@@ -37,11 +37,13 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _indicatorHideTimer;
 
     private bool _isNumpadVisible;
+    private bool _isNumpadMode;
     private bool _isExiting;
     private string? _highlightedKeyId;
 
     // Header drag state
     private bool _isDraggingWindow;
+    private bool _didMoveWindowDuringDrag;
     private NativeMethods.POINT _dragStartCursorPos;
     private PointInt32 _dragStartWindowPos;
 
@@ -81,9 +83,10 @@ public sealed partial class MainWindow : Window
         _touchpadService.Initialize(_hwnd);
         _touchpadService.ActivateSwipeDetected += () => DispatcherQueue.TryEnqueue(ShowNumpadWindow);
         _touchpadService.DeactivateSwipeDetected += () => DispatcherQueue.TryEnqueue(HideNumpadWindow);
-        _touchpadService.TouchPointPreview += (sx, sy, cx, cy) => DispatcherQueue.TryEnqueue(() => OnTouchPointPreview(sx, sy, cx, cy));
+        _touchpadService.TouchPointPreview += (nx, ny) => DispatcherQueue.TryEnqueue(() => OnTouchPointPreview(nx, ny));
         _touchpadService.TouchPreviewCancelled += () => DispatcherQueue.TryEnqueue(HideTouchIndicator);
         _touchpadService.NumpadTapDetected += (nx, ny) => DispatcherQueue.TryEnqueue(() => OnNumpadTap(nx, ny));
+        _touchpadService.EdgeExitToMouseModeDetected += (nx, ny) => DispatcherQueue.TryEnqueue(() => ExitToMouseMode(nx, ny));
 
         _trayService.Initialize(_hwnd, $"TouchNumPad ({_settings.GetHotkeyDisplayText()})");
         _trayService.ToggleRequested += () => DispatcherQueue.TryEnqueue(ToggleNumpadWindow);
@@ -409,13 +412,30 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // Selecting the Numpad window while in Mouse Mode switches back to Numpad Mode (hiding the mouse cursor)
+    private void NumpadSurfaceGrid_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isNumpadMode)
+        {
+            EnterNumpadMode();
+            e.Handled = true;
+        }
+    }
+
     // Direct mouse / touch screen interaction on the Numpad window
     private void KeyCard_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        if (!_isNumpadMode)
+        {
+            EnterNumpadMode();
+            e.Handled = true;
+            return;
+        }
+
         if (sender is Border border && border.Tag is NumpadKeyDefinition key)
         {
             var pt = e.GetCurrentPoint(KeysGrid).Position;
-            ShowTouchIndicatorAtCanvasPoints(pt.X, pt.Y, pt.X, pt.Y);
+            ShowTouchIndicatorAtCanvasPoint(pt.X, pt.Y);
             SetHighlightedKey(key.Id);
             KeyboardInjector.SendKey(key);
 
@@ -427,6 +447,9 @@ public sealed partial class MainWindow : Window
 
     private void KeyCard_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (!_isNumpadMode)
+            return;
+
         _indicatorHideTimer.Stop();
         _indicatorHideTimer.Start();
     }
@@ -440,9 +463,9 @@ public sealed partial class MainWindow : Window
     }
 
     // Touchpad touch events
-    private void OnTouchPointPreview(double startNormX, double startNormY, double curNormX, double curNormY)
+    private void OnTouchPointPreview(double normX, double normY)
     {
-        if (!_isNumpadVisible || _settingsWindow is not null)
+        if (!_isNumpadVisible || !_isNumpadMode || _settingsWindow is not null)
             return;
 
         _indicatorHideTimer.Stop();
@@ -452,20 +475,18 @@ public sealed partial class MainWindow : Window
         if (width <= 0 || height <= 0)
             return;
 
-        double startCanvasX = Math.Clamp(startNormX, 0.0, 1.0) * width;
-        double startCanvasY = Math.Clamp(startNormY, 0.0, 1.0) * height;
-        double curCanvasX = Math.Clamp(curNormX, 0.0, 1.0) * width;
-        double curCanvasY = Math.Clamp(curNormY, 0.0, 1.0) * height;
+        double canvasX = Math.Clamp(normX, 0.0, 1.0) * width;
+        double canvasY = Math.Clamp(normY, 0.0, 1.0) * height;
 
-        ShowTouchIndicatorAtCanvasPoints(startCanvasX, startCanvasY, curCanvasX, curCanvasY);
+        ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY);
 
-        var hitKey = NumpadKeyMap.HitTestNormalized(curNormX, curNormY);
+        var hitKey = NumpadKeyMap.HitTestNormalized(normX, normY);
         SetHighlightedKey(hitKey?.Id);
     }
 
     private void OnNumpadTap(double normX, double normY)
     {
-        if (!_isNumpadVisible || _settingsWindow is not null)
+        if (!_isNumpadVisible || !_isNumpadMode || _settingsWindow is not null)
             return;
 
         double width = KeysGrid.ActualWidth;
@@ -474,14 +495,7 @@ public sealed partial class MainWindow : Window
         {
             double canvasX = Math.Clamp(normX, 0.0, 1.0) * width;
             double canvasY = Math.Clamp(normY, 0.0, 1.0) * height;
-            if (TouchThresholdCircle.Visibility != Visibility.Visible)
-            {
-                ShowTouchIndicatorAtCanvasPoints(canvasX, canvasY, canvasX, canvasY);
-            }
-            else
-            {
-                SetCurrentDotCanvasPoint(canvasX, canvasY);
-            }
+            ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY);
         }
 
         var hitKey = NumpadKeyMap.HitTestNormalized(normX, normY);
@@ -495,44 +509,47 @@ public sealed partial class MainWindow : Window
         _indicatorHideTimer.Start();
     }
 
-    private void ShowTouchIndicatorAtCanvasPoints(
-        double startCanvasX,
-        double startCanvasY,
-        double curCanvasX,
-        double curCanvasY)
+    private void ShowTouchIndicatorAtCanvasPoint(double canvasX, double canvasY)
     {
-        double gridWidth = KeysGrid.ActualWidth;
-        double gridHeight = KeysGrid.ActualHeight;
-
-        double thresholdRadiusX = gridWidth > 0
-            ? TouchpadInputService.TapMovementThreshold * gridWidth
-            : 27.0;
-        double thresholdRadiusY = gridHeight > 0
-            ? TouchpadInputService.TapMovementThreshold * gridHeight
-            : 27.0;
-
-        TouchThresholdCircle.Width = thresholdRadiusX * 2.0;
-        TouchThresholdCircle.Height = thresholdRadiusY * 2.0;
-        Canvas.SetLeft(TouchThresholdCircle, startCanvasX - thresholdRadiusX);
-        Canvas.SetTop(TouchThresholdCircle, startCanvasY - thresholdRadiusY);
-        TouchThresholdCircle.Visibility = Visibility.Visible;
-
-        SetCurrentDotCanvasPoint(curCanvasX, curCanvasY);
-    }
-
-    private void SetCurrentDotCanvasPoint(double curCanvasX, double curCanvasY)
-    {
-        double dotRadius = TouchCurrentDot.Width / 2.0;
-        Canvas.SetLeft(TouchCurrentDot, curCanvasX - dotRadius);
-        Canvas.SetTop(TouchCurrentDot, curCanvasY - dotRadius);
-        TouchCurrentDot.Visibility = Visibility.Visible;
+        double radius = TouchIndicatorCircle.Width / 2.0;
+        Canvas.SetLeft(TouchIndicatorCircle, canvasX - radius);
+        Canvas.SetTop(TouchIndicatorCircle, canvasY - radius);
+        TouchIndicatorCircle.Visibility = Visibility.Visible;
     }
 
     private void HideTouchIndicator()
     {
-        TouchThresholdCircle.Visibility = Visibility.Collapsed;
-        TouchCurrentDot.Visibility = Visibility.Collapsed;
+        TouchIndicatorCircle.Visibility = Visibility.Collapsed;
         SetHighlightedKey(null);
+    }
+
+    private void EnterNumpadMode()
+    {
+        if (!_isNumpadVisible || _settingsWindow is not null)
+            return;
+
+        _isNumpadMode = true;
+        _touchpadService.IsNumpadActive = true;
+        CursorVisibilityService.HideCursor();
+    }
+
+    private void ExitToMouseMode(double? edgeNormX = null, double? edgeNormY = null)
+    {
+        _isNumpadMode = false;
+        _touchpadService.IsNumpadActive = false;
+        HideTouchIndicator();
+
+        if (edgeNormX.HasValue && edgeNormY.HasValue && _appWindow is not null)
+        {
+            var winPos = _appWindow.Position;
+            var winSize = _appWindow.Size;
+
+            int cursorX = winPos.X + (int)Math.Round(Math.Clamp(edgeNormX.Value, 0.0, 1.0) * winSize.Width);
+            int cursorY = winPos.Y + (int)Math.Round(Math.Clamp(edgeNormY.Value, 0.0, 1.0) * winSize.Height);
+            NativeMethods.SetCursorPos(cursorX, cursorY);
+        }
+
+        CursorVisibilityService.ShowCursor();
     }
 
     // Window Show / Hide / Toggle (Numpad only works while window is open)
@@ -545,7 +562,6 @@ public sealed partial class MainWindow : Window
         TryPositionNearActiveInput();
 
         _isNumpadVisible = true;
-        _touchpadService.IsNumpadActive = _settingsWindow is null;
 
         NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_SHOWNOACTIVATE);
         NativeMethods.SetWindowPos(
@@ -556,6 +572,11 @@ public sealed partial class MainWindow : Window
             0,
             0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+
+        if (_settingsWindow is null)
+        {
+            EnterNumpadMode();
+        }
     }
 
     private void TryPositionNearActiveInput()
@@ -646,8 +667,10 @@ public sealed partial class MainWindow : Window
             return;
 
         _isNumpadVisible = false;
+        _isNumpadMode = false;
         _touchpadService.IsNumpadActive = false;
         HideTouchIndicator();
+        CursorVisibilityService.ShowCursor();
 
         NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
     }
@@ -660,13 +683,14 @@ public sealed partial class MainWindow : Window
             ShowNumpadWindow();
     }
 
-    // Dragging the borderless window via HeaderBar
+    // Dragging the borderless window via HeaderBar (excluding Settings & Close buttons)
     private void HeaderBar_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         var props = e.GetCurrentPoint(HeaderBar).Properties;
         if (props.IsLeftButtonPressed && _appWindow is not null)
         {
             _isDraggingWindow = true;
+            _didMoveWindowDuringDrag = false;
             HeaderBar.CapturePointer(e.Pointer);
             NativeMethods.GetCursorPos(out _dragStartCursorPos);
             _dragStartWindowPos = _appWindow.Position;
@@ -682,6 +706,11 @@ public sealed partial class MainWindow : Window
         NativeMethods.GetCursorPos(out var currentCursor);
         int dx = currentCursor.X - _dragStartCursorPos.X;
         int dy = currentCursor.Y - _dragStartCursorPos.Y;
+
+        if (Math.Abs(dx) >= 3 || Math.Abs(dy) >= 3)
+        {
+            _didMoveWindowDuringDrag = true;
+        }
 
         int newX = _dragStartWindowPos.X + dx;
         int newY = _dragStartWindowPos.Y + dy;
@@ -700,32 +729,39 @@ public sealed partial class MainWindow : Window
 
     private void HeaderBar_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        EndWindowDrag(e.Pointer);
+        EndWindowDrag(e.Pointer, isCanceled: false);
     }
 
     private void HeaderBar_PointerCanceled(object sender, PointerRoutedEventArgs e)
     {
-        EndWindowDrag(e.Pointer);
+        EndWindowDrag(e.Pointer, isCanceled: true);
     }
 
-    private void EndWindowDrag(Pointer pointer)
+    private void EndWindowDrag(Pointer pointer, bool isCanceled)
     {
         if (!_isDraggingWindow)
             return;
 
+        bool moved = _didMoveWindowDuringDrag;
         _isDraggingWindow = false;
+        _didMoveWindowDuringDrag = false;
         HeaderBar.ReleasePointerCapture(pointer);
 
-        if (_appWindow is not null)
+        if (moved && _appWindow is not null)
         {
             var pos = _appWindow.Position;
             _settings.WindowX = pos.X;
             _settings.WindowY = pos.Y;
             _settings.Save();
         }
+        else if (!isCanceled && !_isNumpadMode)
+        {
+            // Clicking the header bar (outside Settings and Close buttons) selects the Numpad window -> switch to Numpad Mode
+            EnterNumpadMode();
+        }
     }
 
-    // Header Buttons
+    // Header Buttons (Excluded from switching back to Numpad mode)
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
         OpenSettingsWindow();
@@ -745,9 +781,8 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // Pause touchpad numpad input while the settings window is open so touchpad works normally as a mouse
-        _touchpadService.IsNumpadActive = false;
-        HideTouchIndicator();
+        // Switch to mouse mode while the settings window is open so touchpad works normally with visible cursor
+        ExitToMouseMode();
 
         _settingsWindow = new SettingsWindow(
             _settings,
@@ -767,10 +802,6 @@ public sealed partial class MainWindow : Window
         _settingsWindow.Closed += (_, _) =>
         {
             _settingsWindow = null;
-            if (_isNumpadVisible)
-            {
-                _touchpadService.IsNumpadActive = true;
-            }
         };
 
         _settingsWindow.BringToFront();
@@ -844,6 +875,7 @@ public sealed partial class MainWindow : Window
     private void ExitApplication()
     {
         _isExiting = true;
+        CursorVisibilityService.ShowCursor();
         NativeMethods.UnregisterHotKey(_hwnd, HotkeyId);
         _touchpadService.Dispose();
         _trayService.Dispose();

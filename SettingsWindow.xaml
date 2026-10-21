@@ -297,12 +297,13 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Grid.Column="0"
-                                               Text="일반 터치패드 작동"
+                                               Text="일반 터치패드 전환"
                                                FontSize="13"
                                                Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                                     <TextBlock Grid.Column="1"
-                                               Text="마우스 커서 이동(드래그), 더블 클릭, 두 손가락 이상 터치 시 자동 전환"
+                                               Text="넘패드 창 끝까지 크게 드래그하면 마우스가 나타나며, 다시 넘패드 창(설정·닫기 제외)을 클릭하면 넘패드 모드로 전환"
                                                FontSize="13"
+                                               TextWrapping="Wrap"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>
                             </StackPanel>

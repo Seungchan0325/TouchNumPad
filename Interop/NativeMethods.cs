@@ -372,6 +372,41 @@ internal static class NativeMethods
     public static extern bool GetCursorPos(out POINT lpPoint);
 
     [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    public const uint SPI_SETCURSORS = 0x0057;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreateCursor(
+        IntPtr hInst,
+        int xHotSpot,
+        int yHotSpot,
+        int nWidth,
+        int nHeight,
+        byte[] pvANDPlane,
+        byte[] pvXORPlane);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyCursor(IntPtr hCursor);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CopyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetSystemCursor(IntPtr hcur, uint id);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SystemParametersInfo(
+        uint uiAction,
+        uint uiParam,
+        IntPtr pvParam,
+        uint fWinIni);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]

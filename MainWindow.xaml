@@ -84,7 +84,9 @@
         <!-- Main Numpad Surface -->
         <Grid x:Name="NumpadSurfaceGrid"
               Grid.Row="1"
-              Margin="10,2,10,10">
+              Background="Transparent"
+              Margin="10,2,10,10"
+              PointerPressed="NumpadSurfaceGrid_PointerPressed">
 
             <!-- 4x5 Numpad Key Grid -->
             <Grid x:Name="KeysGrid"
@@ -105,30 +107,26 @@
                 </Grid.ColumnDefinitions>
             </Grid>
 
-            <!-- Accent Circle Overlay:
-                 - TouchThresholdCircle: Large circle anchored at initial touch start showing movement threshold boundary
-                 - TouchCurrentDot: Small dot tracking real-time current touch position -->
+            <!-- Accent Circle Overlay showing current finger position on the Numpad -->
             <Canvas x:Name="TouchOverlayCanvas"
                     IsHitTestVisible="False">
-                <Grid x:Name="TouchThresholdCircle"
-                      Width="54"
-                      Height="54"
+                <Grid x:Name="TouchIndicatorCircle"
+                      Width="36"
+                      Height="36"
                       Visibility="Collapsed"
                       IsHitTestVisible="False">
                     <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                             Opacity="0.22" />
+                             Opacity="0.28" />
                     <Ellipse Stroke="{ThemeResource AccentFillColorDefaultBrush}"
                              StrokeThickness="2"
-                             Opacity="0.85" />
+                             Opacity="0.90" />
+                    <Ellipse Width="10"
+                             Height="10"
+                             Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                             Opacity="0.98"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
                 </Grid>
-
-                <Ellipse x:Name="TouchCurrentDot"
-                         Width="14"
-                         Height="14"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.98"
-                         Visibility="Collapsed"
-                         IsHitTestVisible="False" />
             </Canvas>
         </Grid>
     </Grid>

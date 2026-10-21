@@ -14,10 +14,6 @@ public sealed class TouchpadInputService : IDisposable
 {
     private const ushort HID_USAGE_PAGE_BUTTON = 0x09;
     private const ushort HID_USAGE_BUTTON_1 = 0x01;
-    private static readonly IntPtr InjectedMouseSignature = new(0x544E5001);
-
-    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
 
     // Top edge swipe thresholds (normalized 0.0 .. 1.0)
     private const double TopEdgeStartMaxY = 0.22;
@@ -26,24 +22,23 @@ public sealed class TouchpadInputService : IDisposable
     private const double RightEdgeStartMinX = 0.70;
     private const double SwipeMinSpanX = 0.45;
 
-    // Single-touch vs mouse-move / double-tap thresholds
-    public const double TapMovementThreshold = 0.085; // 8.5% of touchpad surface
+    // Tap vs slide-aim vs edge-exit thresholds
+    private const double TapMaxMovement = 0.085;
     private const long MaxTapDurationMs = 1500;
-    private const int DoubleTapWindowMs = 220;
+    private const double EdgeExitMinDragDistance = 0.22;
+    private const double EdgeBoundaryMargin = 0.045;
     private const int LiftWatchdogTimeoutMs = 70;
 
     private readonly Dictionary<IntPtr, CachedDeviceInfo> _deviceCache = new();
     private readonly List<TouchpadContact> _pendingContacts = new();
     private readonly Timer _liftWatchdogTimer;
-    private readonly Timer _doubleTapCommitTimer;
     private int _expectedContactsInFrame;
 
-    // Session state
-    private volatile bool _inSingleTouchSession;
-    private volatile bool _isMultiTouchSession;
-    private volatile bool _isMouseMoveSession;
-    private volatile bool _isDoubleTapPassthrough;
+    // Touch session state
+    private volatile bool _inTouchSession;
     private volatile bool _swipeTriggeredThisSession;
+    private volatile bool _edgeExitedThisSession;
+    private volatile bool _physicalClickSentThisSession;
     private volatile bool _physicalButtonWasDown;
     private bool _startedAtTopLeft;
     private bool _startedAtTopRight;
@@ -54,43 +49,25 @@ public sealed class TouchpadInputService : IDisposable
     private double _maxDistance;
     private long _startTimeTick;
 
-    // Pending single-tap state (waiting to confirm it's not a double-tap/double-click)
-    private volatile bool _hasPendingSingleTap;
-    private double _pendingTapX;
-    private double _pendingTapY;
-    private long _lastTapReleaseTick;
-    private volatile bool _ateClickDuringFirstTap;
-
-    // Low-level mouse hook to suppress mouse movement & clicks during single-finger numpad touch
+    // Low-level mouse hook to block mouse movement & clicks while in Numpad mode
     private IntPtr _mouseHookHandle = IntPtr.Zero;
     private readonly NativeMethods.LowLevelMouseProc _mouseProcDelegate;
-    private long _suppressLeftClickUntilTick;
-    private bool _suppressingButtonUp;
+    private long _suppressClickUntilTick;
 
-    public bool IsNumpadActive { get; set; }
+    public volatile bool IsNumpadActive;
     public bool IsTouchpadDetected { get; private set; }
 
     public event Action? ActivateSwipeDetected;
     public event Action? DeactivateSwipeDetected;
-    public event Action<double, double, double, double>? TouchPointPreview;
+    public event Action<double, double>? TouchPointPreview;
     public event Action? TouchPreviewCancelled;
     public event Action<double, double>? NumpadTapDetected;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSLLHOOKSTRUCT
-    {
-        public NativeMethods.POINT pt;
-        public uint mouseData;
-        public uint flags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
+    public event Action<double, double>? EdgeExitToMouseModeDetected;
 
     public TouchpadInputService()
     {
         _mouseProcDelegate = MouseHookCallback;
         _liftWatchdogTimer = new Timer(OnLiftWatchdogTick, null, Timeout.Infinite, Timeout.Infinite);
-        _doubleTapCommitTimer = new Timer(OnDoubleTapCommitTick, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public bool Initialize(IntPtr hwnd)
@@ -132,101 +109,34 @@ public sealed class TouchpadInputService : IDisposable
 
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && IsNumpadActive)
+        if (nCode >= 0)
         {
-            if (lParam != IntPtr.Zero)
-            {
-                var hookStruct = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
-                if (hookStruct.dwExtraInfo == InjectedMouseSignature)
-                {
-                    return NativeMethods.CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
-                }
-            }
-
-            // If currently in a double-tap/double-click passthrough session, allow all mouse actions normally
-            if (_isDoubleTapPassthrough)
-            {
-                return NativeMethods.CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
-            }
-
             uint msg = (uint)wParam;
             long now = Environment.TickCount64;
 
-            // While a single finger is touching the touchpad within the tap threshold,
-            // block mouse movement and clicks so it acts as a numpad rather than moving the cursor.
-            if (_inSingleTouchSession && !_isMouseMoveSession && !_isMultiTouchSession && !_swipeTriggeredThisSession)
+            // While in Numpad Mode, suppress all touchpad/mouse movement and button clicks
+            if (IsNumpadActive)
             {
-                if (msg == NativeMethods.WM_MOUSEMOVE)
+                if (msg is NativeMethods.WM_MOUSEMOVE
+                    or NativeMethods.WM_LBUTTONDOWN
+                    or NativeMethods.WM_LBUTTONUP
+                    or NativeMethods.WM_LBUTTONDBLCLK
+                    or NativeMethods.WM_RBUTTONDOWN
+                    or NativeMethods.WM_RBUTTONUP)
                 {
-                    return new IntPtr(1);
-                }
-
-                if (msg == NativeMethods.WM_LBUTTONDOWN)
-                {
-                    _ateClickDuringFirstTap = true;
-                    _suppressingButtonUp = true;
-                    _suppressLeftClickUntilTick = now + 300;
-                    return new IntPtr(1);
-                }
-
-                if (msg == NativeMethods.WM_LBUTTONUP)
-                {
-                    _suppressingButtonUp = false;
                     return new IntPtr(1);
                 }
             }
-
-            if (msg == NativeMethods.WM_LBUTTONDOWN && (now <= _suppressLeftClickUntilTick || _hasPendingSingleTap))
+            else if (now <= _suppressClickUntilTick)
             {
-                _ateClickDuringFirstTap = true;
-                _suppressingButtonUp = true;
-                return new IntPtr(1);
-            }
-
-            if (msg == NativeMethods.WM_LBUTTONUP && (_suppressingButtonUp || now <= _suppressLeftClickUntilTick || _hasPendingSingleTap))
-            {
-                _suppressingButtonUp = false;
-                return new IntPtr(1);
+                if (msg is NativeMethods.WM_LBUTTONDOWN or NativeMethods.WM_LBUTTONUP)
+                {
+                    return new IntPtr(1);
+                }
             }
         }
 
         return NativeMethods.CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
-    }
-
-    private static void ReplayLeftMouseClick()
-    {
-        NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[2];
-
-        inputs[0].type = 0; // INPUT_MOUSE
-        inputs[0].U.mi = new NativeMethods.MOUSEINPUT
-        {
-            dwFlags = MOUSEEVENTF_LEFTDOWN,
-            dwExtraInfo = InjectedMouseSignature
-        };
-
-        inputs[1].type = 0; // INPUT_MOUSE
-        inputs[1].U.mi = new NativeMethods.MOUSEINPUT
-        {
-            dwFlags = MOUSEEVENTF_LEFTUP,
-            dwExtraInfo = InjectedMouseSignature
-        };
-
-        NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
-    }
-
-    private void OnDoubleTapCommitTick(object? state)
-    {
-        if (!_hasPendingSingleTap)
-            return;
-
-        _hasPendingSingleTap = false;
-        _ateClickDuringFirstTap = false;
-
-        if (IsNumpadActive && !_isDoubleTapPassthrough)
-        {
-            _suppressLeftClickUntilTick = Environment.TickCount64 + 150;
-            NumpadTapDetected?.Invoke(_pendingTapX, _pendingTapY);
-        }
     }
 
     public void ProcessWmInput(IntPtr lParam)
@@ -513,7 +423,7 @@ public sealed class TouchpadInputService : IDisposable
 
     private void OnLiftWatchdogTick(object? state)
     {
-        if (_inSingleTouchSession || _isMultiTouchSession)
+        if (_inTouchSession)
         {
             ProcessContactFrame([], physicalButtonPressed: false);
         }
@@ -543,36 +453,18 @@ public sealed class TouchpadInputService : IDisposable
             _liftWatchdogTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
-        // 2 or more fingers -> normal touchpad mode immediately
-        if (activeCount >= 2)
+        if (activeCount >= 1)
         {
-            _doubleTapCommitTimer.Change(Timeout.Infinite, Timeout.Infinite);
-            _hasPendingSingleTap = false;
-
-            if (!_isMultiTouchSession)
-            {
-                _isMultiTouchSession = true;
-                TouchPreviewCancelled?.Invoke();
-            }
-            return;
-        }
-
-        // 1 finger active
-        if (activeCount == 1)
-        {
-            if (_isMultiTouchSession)
-            {
-                return;
-            }
-
             double x = primaryActive.NormalizedX;
             double y = primaryActive.NormalizedY;
             long now = Environment.TickCount64;
 
-            if (!_inSingleTouchSession)
+            if (!_inTouchSession)
             {
-                _inSingleTouchSession = true;
+                _inTouchSession = true;
                 _swipeTriggeredThisSession = false;
+                _edgeExitedThisSession = false;
+                _physicalClickSentThisSession = false;
                 _physicalButtonWasDown = physicalButtonPressed;
                 _startX = x;
                 _startY = y;
@@ -581,78 +473,16 @@ public sealed class TouchpadInputService : IDisposable
                 _maxDistance = 0.0;
                 _startTimeTick = now;
 
-                // Check if this touch is the second touch of a double-tap / double-click
-                if (_hasPendingSingleTap && (now - _lastTapReleaseTick) <= DoubleTapWindowMs)
-                {
-                    _doubleTapCommitTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                    _hasPendingSingleTap = false;
-                    _isDoubleTapPassthrough = true;
-                    _isMouseMoveSession = true;
-                    _suppressLeftClickUntilTick = 0;
-                    _suppressingButtonUp = false;
-
-                    TouchPreviewCancelled?.Invoke();
-
-                    if (_ateClickDuringFirstTap)
-                    {
-                        _ateClickDuringFirstTap = false;
-                        ReplayLeftMouseClick();
-                    }
-                    return;
-                }
-
-                _isDoubleTapPassthrough = false;
-                _isMouseMoveSession = false;
-                _ateClickDuringFirstTap = false;
-
                 _startedAtTopLeft = x <= LeftEdgeStartMaxX && y <= TopEdgeStartMaxY;
                 _startedAtTopRight = x >= RightEdgeStartMinX && y <= TopEdgeStartMaxY;
 
                 if (IsNumpadActive)
                 {
-                    TouchPointPreview?.Invoke(_startX, _startY, x, y);
+                    TouchPointPreview?.Invoke(x, y);
                 }
             }
             else
             {
-                if (_isDoubleTapPassthrough)
-                {
-                    return;
-                }
-
-                // Check if user physically double-clicked without lifting their finger off the touchpad
-                if (physicalButtonPressed && !_physicalButtonWasDown)
-                {
-                    _physicalButtonWasDown = true;
-                    if (_hasPendingSingleTap && (now - _lastTapReleaseTick) <= DoubleTapWindowMs)
-                    {
-                        _doubleTapCommitTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                        _hasPendingSingleTap = false;
-                        _isDoubleTapPassthrough = true;
-                        _isMouseMoveSession = true;
-                        _suppressLeftClickUntilTick = 0;
-                        _suppressingButtonUp = false;
-
-                        TouchPreviewCancelled?.Invoke();
-                        ReplayLeftMouseClick();
-                        ReplayLeftMouseClick();
-                        return;
-                    }
-                }
-                else if (!physicalButtonPressed && _physicalButtonWasDown)
-                {
-                    // Physical button released while finger is still resting on touchpad
-                    _physicalButtonWasDown = false;
-                    if (IsNumpadActive && !_isMouseMoveSession && !_swipeTriggeredThisSession)
-                    {
-                        _hasPendingSingleTap = true;
-                        _pendingTapX = x;
-                        _pendingTapY = y;
-                        _lastTapReleaseTick = now;
-                        _doubleTapCommitTimer.Change(DoubleTapWindowMs, Timeout.Infinite);
-                    }
-                }
-
                 _lastX = x;
                 _lastY = y;
 
@@ -662,13 +492,12 @@ public sealed class TouchpadInputService : IDisposable
                 if (dist > _maxDistance)
                     _maxDistance = dist;
 
-                // Check top-edge swipe gestures
-                if (!_swipeTriggeredThisSession)
+                // 1. Check top-edge open/close swipes
+                if (!_swipeTriggeredThisSession && !_edgeExitedThisSession)
                 {
                     if (_startedAtTopLeft && y <= TopEdgeTrackMaxY && x >= RightEdgeStartMinX && (x - _startX) >= SwipeMinSpanX)
                     {
                         _swipeTriggeredThisSession = true;
-                        _isMouseMoveSession = true;
                         TouchPreviewCancelled?.Invoke();
                         ActivateSwipeDetected?.Invoke();
                         return;
@@ -677,67 +506,80 @@ public sealed class TouchpadInputService : IDisposable
                     if (_startedAtTopRight && y <= TopEdgeTrackMaxY && x <= LeftEdgeStartMaxX && (_startX - x) >= SwipeMinSpanX)
                     {
                         _swipeTriggeredThisSession = true;
-                        _isMouseMoveSession = true;
                         TouchPreviewCancelled?.Invoke();
                         DeactivateSwipeDetected?.Invoke();
                         return;
                     }
                 }
 
-                // Check if movement exceeds single-touch threshold -> user is moving the mouse cursor
-                if (_maxDistance > TapMovementThreshold)
+                if (!IsNumpadActive || _swipeTriggeredThisSession || _edgeExitedThisSession)
                 {
-                    if (!_isMouseMoveSession)
-                    {
-                        _isMouseMoveSession = true;
-                        _doubleTapCommitTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                        _hasPendingSingleTap = false;
-                        TouchPreviewCancelled?.Invoke();
-                    }
+                    return;
                 }
-                else if (IsNumpadActive && !_isMouseMoveSession)
+
+                // 2. Check if user dragged largely and reached the edge of the Numpad window -> switch to Mouse/Touchpad mode!
+                bool isAtOuterEdge = x <= EdgeBoundaryMargin
+                    || x >= (1.0 - EdgeBoundaryMargin)
+                    || y <= EdgeBoundaryMargin
+                    || y >= (1.0 - EdgeBoundaryMargin);
+
+                // Don't trigger edge-exit while in the middle of a top-right-to-left close swipe track
+                bool isTrackingTopRightCloseSwipe = _startedAtTopRight && y <= TopEdgeTrackMaxY && x < _startX;
+
+                if (_maxDistance >= EdgeExitMinDragDistance && isAtOuterEdge && !isTrackingTopRightCloseSwipe)
                 {
-                    TouchPointPreview?.Invoke(_startX, _startY, x, y);
+                    _edgeExitedThisSession = true;
+                    IsNumpadActive = false;
+                    TouchPreviewCancelled?.Invoke();
+                    EdgeExitToMouseModeDetected?.Invoke(x, y);
+                    return;
                 }
+
+                // 3. If physical touchpad button is clicked while resting/aiming finger in Numpad mode, send the key
+                if (physicalButtonPressed && !_physicalButtonWasDown)
+                {
+                    _physicalButtonWasDown = true;
+                    _physicalClickSentThisSession = true;
+                    _suppressClickUntilTick = now + 200;
+                    NumpadTapDetected?.Invoke(x, y);
+                }
+                else if (!physicalButtonPressed && _physicalButtonWasDown)
+                {
+                    _physicalButtonWasDown = false;
+                }
+
+                // 4. Continuously display the finger's resting position on the Numpad window
+                TouchPointPreview?.Invoke(x, y);
             }
 
             return;
         }
 
-        // 0 fingers active -> all fingers lifted
-        if (activeCount == 0)
+        // All fingers lifted (activeCount == 0)
+        if (_inTouchSession)
         {
             long now = Environment.TickCount64;
+            long elapsedMs = now - _startTimeTick;
 
-            if (_inSingleTouchSession && !_isMultiTouchSession && !_isMouseMoveSession && !_swipeTriggeredThisSession && !_isDoubleTapPassthrough)
+            if (IsNumpadActive
+                && !_swipeTriggeredThisSession
+                && !_edgeExitedThisSession
+                && !_physicalClickSentThisSession
+                && _maxDistance <= TapMaxMovement
+                && elapsedMs <= MaxTapDurationMs)
             {
-                long elapsedMs = now - _startTimeTick;
-                if (IsNumpadActive && elapsedMs <= MaxTapDurationMs)
-                {
-                    if (!_hasPendingSingleTap)
-                    {
-                        _hasPendingSingleTap = true;
-                        _pendingTapX = _lastX;
-                        _pendingTapY = _lastY;
-                        _lastTapReleaseTick = now;
-                        _doubleTapCommitTimer.Change(DoubleTapWindowMs, Timeout.Infinite);
-                    }
-                }
-                else
-                {
-                    TouchPreviewCancelled?.Invoke();
-                }
+                _suppressClickUntilTick = now + 150;
+                NumpadTapDetected?.Invoke(_lastX, _lastY);
             }
-            else if (!_hasPendingSingleTap)
+            else
             {
                 TouchPreviewCancelled?.Invoke();
             }
 
-            _inSingleTouchSession = false;
-            _isMultiTouchSession = false;
-            _isMouseMoveSession = false;
-            _isDoubleTapPassthrough = false;
+            _inTouchSession = false;
             _swipeTriggeredThisSession = false;
+            _edgeExitedThisSession = false;
+            _physicalClickSentThisSession = false;
             _physicalButtonWasDown = false;
         }
     }
@@ -745,7 +587,6 @@ public sealed class TouchpadInputService : IDisposable
     public void Dispose()
     {
         _liftWatchdogTimer.Dispose();
-        _doubleTapCommitTimer.Dispose();
 
         if (_mouseHookHandle != IntPtr.Zero)
         {
