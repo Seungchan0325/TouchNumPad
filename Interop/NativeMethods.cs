@@ -572,9 +572,13 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
-    [DllImport("winmm.dll", SetLastError = true)]
+    [DllImport("winmm.dll", EntryPoint = "PlaySoundW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool PlaySound(byte[]? ptrToSound, IntPtr hmod, uint fdwSound);
+    public static extern bool PlaySound(IntPtr ptrToSound, IntPtr hmod, uint fdwSound);
+
+    [DllImport("winmm.dll", EntryPoint = "PlaySoundW", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PlaySound(string? pszSound, IntPtr hmod, uint fdwSound);
 
     public const uint SND_ASYNC = 0x0001;
     public const uint SND_NODEFAULT = 0x0002;

@@ -377,6 +377,11 @@ public sealed partial class SettingsWindow : Window
 
         _settings.EnableSound = SoundToggleSwitch.IsOn;
         _settings.Save();
+
+        if (_settings.EnableSound)
+        {
+            _feedbackService.KeyCommitted();
+        }
     }
 
     private void SoundVolumeSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
@@ -389,6 +394,7 @@ public sealed partial class SettingsWindow : Window
 
         _settings.SoundVolume = pct / 100.0;
         _feedbackService.EnsureBuffersUpdated();
+        _feedbackService.KeyCommitted();
         _settings.Save();
     }
 

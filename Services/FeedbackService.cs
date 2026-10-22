@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using TouchNumPad.Interop;
 using TouchNumPad.Models;
 using Windows.Devices.Haptics;
@@ -12,10 +13,12 @@ public sealed class FeedbackService : IDisposable
     private SimpleHapticsControllerFeedback? _clickWaveform;
     private SimpleHapticsControllerFeedback? _bumpWaveform;
 
-    private byte[]? _lightTickWav;
-    private byte[]? _homeBumpWav;
-    private byte[]? _keyClickWav;
+    // Pinned unmanaged memory pointers for WinMM PlaySound (SND_MEMORY | SND_ASYNC)
+    private IntPtr _pLightTick = IntPtr.Zero;
+    private IntPtr _pHomeBump = IntPtr.Zero;
+    private IntPtr _pKeyClick = IntPtr.Zero;
     private double _cachedVolume = -1;
+    private readonly object _soundLock = new();
 
     public bool IsHapticsSupported { get; private set; }
 
@@ -86,14 +89,11 @@ public sealed class FeedbackService : IDisposable
 
     private void TriggerLightTick()
     {
-        bool hapticTriggered = false;
-
         if (_settings.EnableHaptics && _hapticsController is not null && _clickWaveform is not null)
         {
             try
             {
                 _hapticsController.SendHapticFeedback(_clickWaveform, 0.45);
-                hapticTriggered = true;
             }
             catch
             {
@@ -101,16 +101,15 @@ public sealed class FeedbackService : IDisposable
             }
         }
 
-        if (_settings.EnableSound && (!hapticTriggered || _settings.EnableSound))
+        if (_settings.EnableSound)
         {
-            PlaySoundInternal(_lightTickWav);
+            EnsureBuffersUpdated();
+            PlaySoundInternal(_pLightTick);
         }
     }
 
     private void TriggerHomeKeyBump()
     {
-        bool hapticTriggered = false;
-
         if (_settings.EnableHaptics && _hapticsController is not null)
         {
             try
@@ -119,7 +118,6 @@ public sealed class FeedbackService : IDisposable
                 if (wf is not null)
                 {
                     _hapticsController.SendHapticFeedback(wf, 1.0);
-                    hapticTriggered = true;
                 }
             }
             catch
@@ -128,22 +126,20 @@ public sealed class FeedbackService : IDisposable
             }
         }
 
-        if (_settings.EnableSound && (!hapticTriggered || _settings.EnableSound))
+        if (_settings.EnableSound)
         {
-            PlaySoundInternal(_homeBumpWav);
+            EnsureBuffersUpdated();
+            PlaySoundInternal(_pHomeBump);
         }
     }
 
     private void TriggerKeyCommit()
     {
-        bool hapticTriggered = false;
-
         if (_settings.EnableHaptics && _hapticsController is not null && _clickWaveform is not null)
         {
             try
             {
                 _hapticsController.SendHapticFeedback(_clickWaveform, 0.85);
-                hapticTriggered = true;
             }
             catch
             {
@@ -151,19 +147,19 @@ public sealed class FeedbackService : IDisposable
             }
         }
 
-        if (_settings.EnableSound && (!hapticTriggered || _settings.EnableSound))
+        if (_settings.EnableSound)
         {
-            PlaySoundInternal(_keyClickWav);
+            EnsureBuffersUpdated();
+            PlaySoundInternal(_pKeyClick);
         }
     }
 
-    private void PlaySoundInternal(byte[]? wavData)
+    private void PlaySoundInternal(IntPtr pSound)
     {
-        if (wavData is null || wavData.Length == 0 || _settings.SoundVolume <= 0.001)
+        if (pSound == IntPtr.Zero || _settings.SoundVolume <= 0.001)
             return;
 
-        EnsureBuffersUpdated();
-        NativeMethods.PlaySound(wavData, IntPtr.Zero, NativeMethods.SND_ASYNC | NativeMethods.SND_MEMORY | NativeMethods.SND_NODEFAULT);
+        NativeMethods.PlaySound(pSound, IntPtr.Zero, NativeMethods.SND_ASYNC | NativeMethods.SND_MEMORY | NativeMethods.SND_NODEFAULT);
     }
 
     public void EnsureBuffersUpdated()
@@ -176,71 +172,116 @@ public sealed class FeedbackService : IDisposable
 
     private void RebuildSoundBuffers()
     {
-        double vol = Math.Clamp(_settings.SoundVolume, 0.0, 1.0);
-        _cachedVolume = vol;
+        lock (_soundLock)
+        {
+            double vol = Math.Clamp(_settings.SoundVolume, 0.0, 1.0);
+            _cachedVolume = vol;
 
-        _lightTickWav = SynthesizeLightTickWav(vol);
-        _homeBumpWav = SynthesizeHomeBumpWav(vol);
-        _keyClickWav = SynthesizeKeyClickWav(vol);
+            // Stop any playing sound before modifying buffers
+            NativeMethods.PlaySound(IntPtr.Zero, IntPtr.Zero, 0);
+            FreeUnmanagedBuffers();
+
+            if (vol <= 0.001)
+                return;
+
+            byte[] tickBytes = SynthesizeLightTickWav(vol);
+            byte[] bumpBytes = SynthesizeHomeBumpWav(vol);
+            byte[] clickBytes = SynthesizeKeyClickWav(vol);
+
+            _pLightTick = Marshal.AllocHGlobal(tickBytes.Length);
+            Marshal.Copy(tickBytes, 0, _pLightTick, tickBytes.Length);
+
+            _pHomeBump = Marshal.AllocHGlobal(bumpBytes.Length);
+            Marshal.Copy(bumpBytes, 0, _pHomeBump, bumpBytes.Length);
+
+            _pKeyClick = Marshal.AllocHGlobal(clickBytes.Length);
+            Marshal.Copy(clickBytes, 0, _pKeyClick, clickBytes.Length);
+        }
     }
 
-    // Synthesizes a crisp, subtle micro-tick (1300Hz, 8ms exponential decay)
+    private void FreeUnmanagedBuffers()
+    {
+        if (_pLightTick != IntPtr.Zero)
+        {
+            Marshal.FreeHGlobal(_pLightTick);
+            _pLightTick = IntPtr.Zero;
+        }
+        if (_pHomeBump != IntPtr.Zero)
+        {
+            Marshal.FreeHGlobal(_pHomeBump);
+            _pHomeBump = IntPtr.Zero;
+        }
+        if (_pKeyClick != IntPtr.Zero)
+        {
+            Marshal.FreeHGlobal(_pKeyClick);
+            _pKeyClick = IntPtr.Zero;
+        }
+    }
+
+    // 1. Crisp micro-tick for boundary crossing (1800Hz + 2600Hz, 25ms, audible on laptop speakers)
     private static byte[] SynthesizeLightTickWav(double volume)
     {
         const int sampleRate = 44100;
-        int numSamples = (int)(sampleRate * 0.009); // 9 ms
+        int numSamples = (int)(sampleRate * 0.025); // 25 ms
         short[] samples = new short[numSamples];
 
         for (int i = 0; i < numSamples; i++)
         {
             double t = (double)i / sampleRate;
-            double decay = Math.Exp(-t / 0.0018);
-            double wave = Math.Sin(2.0 * Math.PI * 1350.0 * t);
-            short sample = (short)(wave * decay * volume * 0.40 * short.MaxValue);
+            double decay = Math.Exp(-t / 0.005);
+            double wave = 0.7 * Math.Sin(2.0 * Math.PI * 1800.0 * t) + 0.3 * Math.Sin(2.0 * Math.PI * 2600.0 * t);
+            short sample = (short)(wave * decay * volume * 0.75 * short.MaxValue);
             samples[i] = sample;
         }
 
         return CreateWavFromSamples(samples, sampleRate);
     }
 
-    // Synthesizes a tactile double-bump (220Hz + 440Hz dual pulse, 28ms) for home key "5"
+    // 2. Tactile double-bump for Home key "5" (650Hz + 1300Hz dual pulse, 45ms)
     private static byte[] SynthesizeHomeBumpWav(double volume)
     {
         const int sampleRate = 44100;
-        int numSamples = (int)(sampleRate * 0.030); // 30 ms
+        int numSamples = (int)(sampleRate * 0.045); // 45 ms
         short[] samples = new short[numSamples];
 
         for (int i = 0; i < numSamples; i++)
         {
             double t = (double)i / sampleRate;
-            double wave1 = Math.Sin(2.0 * Math.PI * 220.0 * t) + 0.4 * Math.Sin(2.0 * Math.PI * 440.0 * t);
-            
-            // Dual pulse envelope: pulse at 0ms and second pulse at 13ms
-            double env1 = Math.Exp(-t / 0.0035);
-            double t2 = Math.Max(0.0, t - 0.012);
-            double env2 = (t >= 0.012) ? Math.Exp(-t2 / 0.004) * 0.9 : 0.0;
+            double wave1 = Math.Sin(2.0 * Math.PI * 650.0 * t) + 0.4 * Math.Sin(2.0 * Math.PI * 1300.0 * t);
+
+            // Dual pulse: 0ms and 18ms
+            double env1 = Math.Exp(-t / 0.006);
+            double t2 = Math.Max(0.0, t - 0.018);
+            double env2 = (t >= 0.018) ? Math.Exp(-t2 / 0.006) * 0.95 : 0.0;
             double env = Math.Max(env1, env2);
 
-            short sample = (short)(wave1 * env * volume * 0.65 * short.MaxValue);
+            short sample = (short)(wave1 * env * volume * 0.85 * short.MaxValue);
             samples[i] = sample;
         }
 
         return CreateWavFromSamples(samples, sampleRate);
     }
 
-    // Synthesizes a tactile key commit click (850Hz, 14ms)
+    // 3. Crisp, satisfying switch click on commit/lift-off (920Hz body + 2800Hz transient click, 35ms)
     private static byte[] SynthesizeKeyClickWav(double volume)
     {
         const int sampleRate = 44100;
-        int numSamples = (int)(sampleRate * 0.015); // 15 ms
+        int numSamples = (int)(sampleRate * 0.035); // 35 ms
         short[] samples = new short[numSamples];
 
         for (int i = 0; i < numSamples; i++)
         {
             double t = (double)i / sampleRate;
-            double decay = Math.Exp(-t / 0.0032);
-            double wave = Math.Sin(2.0 * Math.PI * 880.0 * t) + 0.3 * Math.Sin(2.0 * Math.PI * 1760.0 * t);
-            short sample = (short)(wave * decay * volume * 0.55 * short.MaxValue);
+            // Fast attack click transient
+            double clickDecay = Math.Exp(-t / 0.003);
+            double clickWave = Math.Sin(2.0 * Math.PI * 2800.0 * t);
+
+            // Resonant switch body
+            double bodyDecay = Math.Exp(-t / 0.008);
+            double bodyWave = Math.Sin(2.0 * Math.PI * 920.0 * t) + 0.3 * Math.Sin(2.0 * Math.PI * 1840.0 * t);
+
+            double mixed = (clickWave * clickDecay * 0.45) + (bodyWave * bodyDecay * 0.55);
+            short sample = (short)(mixed * volume * 0.90 * short.MaxValue);
             samples[i] = sample;
         }
 
@@ -256,12 +297,12 @@ public sealed class FeedbackService : IDisposable
         int chunkSize = 36 + subChunk2Size;
 
         // RIFF chunk descriptor
-        bw.Write("RIFF"u8.ToArray());
+        bw.Write("RIFF"u8);
         bw.Write(chunkSize);
-        bw.Write("WAVE"u8.ToArray());
+        bw.Write("WAVE"u8);
 
         // fmt sub-chunk
-        bw.Write("fmt "u8.ToArray());
+        bw.Write("fmt "u8);
         bw.Write(16); // SubChunk1Size (16 for PCM)
         bw.Write((short)1); // AudioFormat (1 = PCM)
         bw.Write((short)1); // NumChannels (1 = Mono)
@@ -271,7 +312,7 @@ public sealed class FeedbackService : IDisposable
         bw.Write((short)16); // BitsPerSample
 
         // data sub-chunk
-        bw.Write("data"u8.ToArray());
+        bw.Write("data"u8);
         bw.Write(subChunk2Size);
 
         for (int i = 0; i < samples.Length; i++)
@@ -287,5 +328,11 @@ public sealed class FeedbackService : IDisposable
         _hapticsController = null;
         _clickWaveform = null;
         _bumpWaveform = null;
+
+        lock (_soundLock)
+        {
+            NativeMethods.PlaySound(IntPtr.Zero, IntPtr.Zero, 0);
+            FreeUnmanagedBuffers();
+        }
     }
 }
