@@ -55,87 +55,21 @@
         <Canvas x:Name="TouchOverlayCanvas"
                 IsHitTestVisible="False">
             <Grid x:Name="TouchIndicatorCircle"
-                  Width="48"
-                  Height="48"
-                  Opacity="0"
+                  Width="24"
+                  Height="24"
+                  Visibility="Collapsed"
                   IsHitTestVisible="False">
-                <Grid.RenderTransform>
-                    <ScaleTransform x:Name="IndicatorScaleTransform"
-                                    CenterX="24"
-                                    CenterY="24"
-                                    ScaleX="1.0"
-                                    ScaleY="1.0" />
-                </Grid.RenderTransform>
-
-                <!-- Layer 1: Ambient Luminous Aura (Soft outer glow) -->
-                <Ellipse Width="48"
-                         Height="48"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.10"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-
-                <!-- Layer 2: Mid Diffusion Ring -->
-                <Ellipse Width="38"
-                         Height="38"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.18"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-
-                <!-- Layer 3: Glass Lens Body (Frosted Translucent Puck) -->
-                <Ellipse x:Name="IndicatorPuckBody"
-                         Width="30"
-                         Height="30"
-                         Fill="{ThemeResource ControlFillColorDefaultBrush}"
-                         Opacity="0.55"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-
-                <!-- Layer 4: Glass Rim / Luminous Contour Stroke -->
-                <Ellipse x:Name="IndicatorPuckRim"
-                         Width="30"
-                         Height="30"
-                         Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                         Opacity="0.25" />
+                <Ellipse Stroke="{ThemeResource AccentFillColorDefaultBrush}"
                          StrokeThickness="1.5"
-                         Opacity="0.95"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-
-                <!-- Layer 5: High-Precision Luminous Core Pip -->
-                <Ellipse x:Name="IndicatorCorePip"
-                         Width="8"
+                         Opacity="0.85" />
+                <Ellipse Width="8"
                          Height="8"
                          Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="1.0"
+                         Opacity="0.98"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
-
-                <!-- Layer 6: Micro Specular Spark Center (Gem/Glass Depth) -->
-                <Ellipse Width="3"
-                         Height="3"
-                         Fill="White"
-                         Opacity="0.95"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-
-                <!-- Layer 7: Commit Ripple Ring (Expands & fades out on key release) -->
-                <Ellipse x:Name="IndicatorRippleRing"
-                         Width="30"
-                         Height="30"
-                         Stroke="{ThemeResource AccentFillColorDefaultBrush}"
-                         StrokeThickness="2"
-                         Opacity="0.0"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center">
-                    <Ellipse.RenderTransform>
-                        <ScaleTransform x:Name="RippleScaleTransform"
-                                        CenterX="15"
-                                        CenterY="15"
-                                        ScaleX="1.0"
-                                        ScaleY="1.0" />
-                    </Ellipse.RenderTransform>
-                </Ellipse>
             </Grid>
         </Canvas>
 
@@ -145,86 +79,34 @@
                 Opacity="0">
             <!-- Finger 1 Indicator Circle -->
             <Grid x:Name="Finger1Indicator"
-                  Width="48"
-                  Height="48">
-                <Ellipse Width="48"
-                         Height="48"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.10"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="38"
-                         Height="38"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.18"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="30"
-                         Height="30"
-                         Fill="{ThemeResource ControlFillColorDefaultBrush}"
-                         Opacity="0.55"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="30"
-                         Height="30"
-                         Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                  Width="24"
+                  Height="24">
+                <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                         Opacity="0.25" />
+                <Ellipse Stroke="{ThemeResource AccentFillColorDefaultBrush}"
                          StrokeThickness="1.5"
-                         Opacity="0.95"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
+                         Opacity="0.85" />
                 <Ellipse Width="8"
                          Height="8"
                          Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="1.0"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="3"
-                         Height="3"
-                         Fill="White"
-                         Opacity="0.95"
+                         Opacity="0.98"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
             </Grid>
 
             <!-- Finger 2 Indicator Circle -->
             <Grid x:Name="Finger2Indicator"
-                  Width="48"
-                  Height="48">
-                <Ellipse Width="48"
-                         Height="48"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.10"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="38"
-                         Height="38"
-                         Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="0.18"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="30"
-                         Height="30"
-                         Fill="{ThemeResource ControlFillColorDefaultBrush}"
-                         Opacity="0.55"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="30"
-                         Height="30"
-                         Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                  Width="24"
+                  Height="24">
+                <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                         Opacity="0.25" />
+                <Ellipse Stroke="{ThemeResource AccentFillColorDefaultBrush}"
                          StrokeThickness="1.5"
-                         Opacity="0.95"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
+                         Opacity="0.85" />
                 <Ellipse Width="8"
                          Height="8"
                          Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                         Opacity="1.0"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-                <Ellipse Width="3"
-                         Height="3"
-                         Fill="White"
-                         Opacity="0.95"
+                         Opacity="0.98"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
             </Grid>
