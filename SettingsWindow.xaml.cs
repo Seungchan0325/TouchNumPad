@@ -175,6 +175,12 @@ public sealed partial class SettingsWindow : Window
         int soundPct = (int)Math.Round(_settings.SoundVolume * 100);
         SoundVolumeSlider.Value = soundPct;
         SoundVolumeText.Text = $"{soundPct}%";
+
+        var appVer = typeof(App).Assembly.GetName().Version;
+        if (appVer is not null)
+        {
+            AppVersionText.Text = $"버전 {appVer.Major}.{appVer.Minor}.{appVer.Build}";
+        }
     }
 
     private void RenderKeycaps(

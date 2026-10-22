@@ -519,7 +519,8 @@
                             </StackPanel>
 
                             <TextBlock Grid.Column="2"
-                                       Text="버전 1.0.0"
+                                       x:Name="AppVersionText"
+                                       Text="버전 1.0.1"
                                        FontSize="12"
                                        VerticalAlignment="Center"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
