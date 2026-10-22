@@ -290,7 +290,7 @@ public sealed partial class MainWindow : Window
                 break;
 
             case NativeMethods.WM_TRAYICON:
-                _trayService.HandleTrayMessage(lParam, _isNumpadVisible);
+                _trayService.HandleTrayMessage(lParam, _isNumpadVisible && _isNumpadMode);
                 return IntPtr.Zero;
 
             case NativeMethods.WM_MOUSEACTIVATE:
@@ -629,7 +629,7 @@ public sealed partial class MainWindow : Window
     // Touchpad touch events
     private void OnTouchPointPreview(double rawX, double rawY, double localX, double localY, bool isInside)
     {
-        if (!_isNumpadVisible || !_isNumpadMode || _settingsWindow is not null)
+        if (!_isNumpadVisible || !_isNumpadMode || (_settingsWindow is not null && _settingsWindow.IsRecordingHotkey))
             return;
 
         _indicatorHideTimer.Stop();
@@ -662,7 +662,7 @@ public sealed partial class MainWindow : Window
 
     private void OnNumpadTap(double rawX, double rawY, double localX, double localY)
     {
-        if (!_isNumpadVisible || !_isNumpadMode || _settingsWindow is not null)
+        if (!_isNumpadVisible || !_isNumpadMode || (_settingsWindow is not null && _settingsWindow.IsRecordingHotkey))
             return;
 
         double width = TouchOverlayCanvas.ActualWidth;
@@ -741,7 +741,7 @@ public sealed partial class MainWindow : Window
 
     private void EnterNumpadMode()
     {
-        if (!_isNumpadVisible || _settingsWindow is not null)
+        if (!_isNumpadVisible || (_settingsWindow is not null && _settingsWindow.IsRecordingHotkey))
             return;
 
         _isNumpadMode = true;
@@ -786,7 +786,7 @@ public sealed partial class MainWindow : Window
             0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
 
-        if (_settingsWindow is null)
+        if (_settingsWindow is null || !_settingsWindow.IsRecordingHotkey)
         {
             EnterNumpadMode();
         }
@@ -891,7 +891,7 @@ public sealed partial class MainWindow : Window
 
     public void ToggleNumpadWindow()
     {
-        if (_isNumpadVisible)
+        if (_isNumpadVisible && _isNumpadMode)
             HideNumpadWindow();
         else
             ShowNumpadWindow();
@@ -922,7 +922,11 @@ public sealed partial class MainWindow : Window
                 }
                 return ok;
             },
-            onSuspendHotkey: () => NativeMethods.UnregisterHotKey(_hwnd, HotkeyId),
+            onSuspendHotkey: () =>
+            {
+                NativeMethods.UnregisterHotKey(_hwnd, HotkeyId);
+                ExitToMouseMode();
+            },
             onResetTransform: () =>
             {
                 _settings.ResetTransform();
@@ -932,6 +936,10 @@ public sealed partial class MainWindow : Window
         _settingsWindow.Closed += (_, _) =>
         {
             _settingsWindow = null;
+            if (_isNumpadVisible && !_isNumpadMode)
+            {
+                EnterNumpadMode();
+            }
         };
 
         _settingsWindow.BringToFront();
