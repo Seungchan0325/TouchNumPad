@@ -297,11 +297,28 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Grid.Column="0"
-                                               Text="일반 터치패드 전환"
+                                               Text="크기 및 각도 조절"
                                                FontSize="13"
                                                Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                                     <TextBlock Grid.Column="1"
-                                               Text="넘패드 창 끝까지 크게 드래그하면 마우스가 나타나며, 다시 넘패드 창(설정·닫기 제외)을 클릭하면 넘패드 모드로 전환"
+                                               Text="터치패드에 두 손가락을 올려 핀치(크기 조절), 회전(각도 조절), 드래그(위치 이동)"
+                                               FontSize="13"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+
+                                <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="140" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="마우스 모드 전환"
+                                               FontSize="13"
+                                               Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="넘패드 영역 바깥을 더블 클릭하거나 가장자리 끝까지 드래그 시 마우스로 전환 (넘패드 창 클릭 시 복귀)"
                                                FontSize="13"
                                                TextWrapping="Wrap"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -311,7 +328,160 @@
                     </Expander>
                 </StackPanel>
 
-                <!-- Section 3: 정보 (About) -->
+                <!-- Section 3: 터치패드 및 피드백 (Touchpad & Feedback) -->
+                <StackPanel Spacing="4">
+                    <TextBlock Text="터치패드 및 피드백"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               Margin="0,0,0,6" />
+
+                    <!-- SettingsCard: 햅틱 피드백 -->
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            MinHeight="68"
+                            Padding="16,12">
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <FontIcon Grid.Column="0"
+                                      Glyph="&#xE954;"
+                                      FontSize="20"
+                                      Width="24"
+                                      VerticalAlignment="Center"
+                                      Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+
+                            <StackPanel Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        Spacing="2">
+                                <TextBlock Text="햅틱 피드백 (지원 장치)"
+                                           FontSize="14"
+                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                <TextBlock x:Name="HapticStatusSubtext"
+                                           Text="정밀 햅틱 터치패드에서 키 경계 진입 및 5번 홈 키 돌기 진동을 제공합니다"
+                                           FontSize="12"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <ToggleSwitch x:Name="HapticsToggleSwitch"
+                                          Grid.Column="2"
+                                          VerticalAlignment="Center"
+                                          Toggled="HapticsToggleSwitch_Toggled" />
+                        </Grid>
+                    </Border>
+
+                    <!-- SettingsCard: 사운드 피드백 및 볼륨 -->
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            MinHeight="68"
+                            Padding="16,12">
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <FontIcon Grid.Column="0"
+                                      Glyph="&#xE995;"
+                                      FontSize="20"
+                                      Width="24"
+                                      VerticalAlignment="Center"
+                                      Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+
+                            <StackPanel Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        Spacing="2">
+                                <TextBlock Text="사운드 피드백"
+                                           FontSize="14"
+                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                <TextBlock Text="키 경계 진입 시 가벼운 틱음, 5번 홈 키 진입 시 묵직한 돌기 사운드를 재생합니다"
+                                           FontSize="12"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="2"
+                                        Orientation="Horizontal"
+                                        Spacing="16"
+                                        VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="8"
+                                            VerticalAlignment="Center">
+                                    <TextBlock x:Name="SoundVolumeText"
+                                               Text="75%"
+                                               Width="36"
+                                               TextAlignment="Right"
+                                               FontSize="13"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               VerticalAlignment="Center" />
+                                    <Slider x:Name="SoundVolumeSlider"
+                                            Width="120"
+                                            Minimum="0"
+                                            Maximum="100"
+                                            StepFrequency="5"
+                                            Value="75"
+                                            VerticalAlignment="Center"
+                                            ValueChanged="SoundVolumeSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <ToggleSwitch x:Name="SoundToggleSwitch"
+                                              VerticalAlignment="Center"
+                                              Toggled="SoundToggleSwitch_Toggled" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- SettingsCard: 넘패드 크기/각도/위치 초기화 -->
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            MinHeight="68"
+                            Padding="16,12">
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <FontIcon Grid.Column="0"
+                                      Glyph="&#xE7AD;"
+                                      FontSize="20"
+                                      Width="24"
+                                      VerticalAlignment="Center"
+                                      Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+
+                            <StackPanel Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        Spacing="2">
+                                <TextBlock Text="넘패드 크기 및 각도 초기화"
+                                           FontSize="14"
+                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                <TextBlock Text="두 손가락 제스처로 변경한 넘패드 크기, 각도, 위치를 기본값으로 되돌립니다"
+                                           FontSize="12"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <Button x:Name="ResetTransformButton"
+                                    Grid.Column="2"
+                                    Content="초기화"
+                                    VerticalAlignment="Center"
+                                    Click="ResetTransformButton_Click" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <!-- Section 4: 정보 (About) -->
                 <StackPanel Spacing="4">
                     <TextBlock Text="정보"
                                Style="{StaticResource BodyStrongTextBlockStyle}"

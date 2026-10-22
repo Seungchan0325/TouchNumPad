@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using TouchNumPad.Interop;
 using TouchNumPad.Models;
+using TouchNumPad.Services;
 using Windows.Graphics;
 using Windows.System;
 using WinRT.Interop;
@@ -27,10 +28,12 @@ public sealed partial class SettingsWindow : Window
     }
 
     private readonly AppSettings _settings;
+    private readonly FeedbackService _feedbackService;
     private readonly Action<double> _onOpacityChanged;
     private readonly Action<AppThemePreference> _onThemeChanged;
     private readonly Func<bool> _onHotkeyChanged;
     private readonly Action _onSuspendHotkey;
+    private readonly Action _onResetTransform;
 
     private IntPtr _hwnd;
     private AppWindow? _appWindow;
@@ -52,16 +55,20 @@ public sealed partial class SettingsWindow : Window
 
     public SettingsWindow(
         AppSettings settings,
+        FeedbackService feedbackService,
         Action<double> onOpacityChanged,
         Action<AppThemePreference> onThemeChanged,
         Func<bool> onHotkeyChanged,
-        Action onSuspendHotkey)
+        Action onSuspendHotkey,
+        Action onResetTransform)
     {
         _settings = settings;
+        _feedbackService = feedbackService;
         _onOpacityChanged = onOpacityChanged;
         _onThemeChanged = onThemeChanged;
         _onHotkeyChanged = onHotkeyChanged;
         _onSuspendHotkey = onSuspendHotkey;
+        _onResetTransform = onResetTransform;
         _keyboardHookDelegate = KeyboardHookCallback;
 
         InitializeComponent();
@@ -155,6 +162,19 @@ public sealed partial class SettingsWindow : Window
             isLarge: false,
             KeyVisualKind.Accent);
         ToolTipService.SetToolTip(EditHotkeyButton, $"활성화 단축키 ({_settings.GetHotkeyDisplayText()})");
+
+        // Sync Touchpad Feedback & Transform
+        HapticsToggleSwitch.IsOn = _settings.EnableHaptics;
+        if (!_feedbackService.IsHapticsSupported)
+        {
+            HapticStatusSubtext.Text = "정밀 햅틱 터치패드가 감지되지 않아 햅틱 기능이 비활성화되었습니다 (사운드 피드백 자동 사용)";
+            HapticsToggleSwitch.IsEnabled = false;
+        }
+
+        SoundToggleSwitch.IsOn = _settings.EnableSound;
+        int soundPct = (int)Math.Round(_settings.SoundVolume * 100);
+        SoundVolumeSlider.Value = soundPct;
+        SoundVolumeText.Text = $"{soundPct}%";
     }
 
     private void RenderKeycaps(
@@ -339,6 +359,42 @@ public sealed partial class SettingsWindow : Window
         _settings.Save();
         ApplyTheme(pref);
         _onThemeChanged(pref);
+    }
+
+    private void HapticsToggleSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_isInitializing)
+            return;
+
+        _settings.EnableHaptics = HapticsToggleSwitch.IsOn;
+        _settings.Save();
+    }
+
+    private void SoundToggleSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_isInitializing)
+            return;
+
+        _settings.EnableSound = SoundToggleSwitch.IsOn;
+        _settings.Save();
+    }
+
+    private void SoundVolumeSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_isInitializing)
+            return;
+
+        int pct = (int)Math.Round(e.NewValue);
+        SoundVolumeText.Text = $"{pct}%";
+
+        _settings.SoundVolume = pct / 100.0;
+        _feedbackService.EnsureBuffersUpdated();
+        _settings.Save();
+    }
+
+    private void ResetTransformButton_Click(object sender, RoutedEventArgs e)
+    {
+        _onResetTransform?.Invoke();
     }
 
     // PowerToys-style Shortcut Recorder Dialog

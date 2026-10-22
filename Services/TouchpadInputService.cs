@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using TouchNumPad.Interop;
+using TouchNumPad.Models;
 
 namespace TouchNumPad.Services;
 
@@ -25,14 +26,24 @@ public sealed class TouchpadInputService : IDisposable
     // Tap vs slide-aim vs edge-exit thresholds
     private const double TapMaxMovement = 0.085;
     private const long MaxTapDurationMs = 1500;
-    private const double EdgeExitMinDragDistance = 0.22;
-    private const double EdgeBoundaryMargin = 0.045;
+    private const double EdgeExitMinDragDistance = 0.25;
+    private const double EdgeBoundaryMargin = 0.035;
     private const int LiftWatchdogTimeoutMs = 70;
 
+    // Outside double tap thresholds
+    private const long OutsideDoubleTapMaxIntervalMs = 380;
+    private const double OutsideDoubleTapMaxDist = 0.12;
+
+    private readonly AppSettings _settings;
+    private readonly FeedbackService _feedbackService;
     private readonly Dictionary<IntPtr, CachedDeviceInfo> _deviceCache = new();
     private readonly List<TouchpadContact> _pendingContacts = new();
     private readonly Timer _liftWatchdogTimer;
     private int _expectedContactsInFrame;
+
+    // Aspect ratio detected from hardware
+    public double TouchpadAspectRatio { get; private set; } = 16.0 / 10.0;
+    public event Action<double>? TouchpadAspectRatioChanged;
 
     // Touch session state
     private volatile bool _inTouchSession;
@@ -49,30 +60,57 @@ public sealed class TouchpadInputService : IDisposable
     private double _maxDistance;
     private long _startTimeTick;
 
-    // Low-level mouse hook to block mouse movement & clicks while in Numpad mode
+    // Two-finger transform gesture state
+    private bool _isTwoFingerGestureActive;
+    private double _prevTwoFingerDist;
+    private double _prevTwoFingerAngleRad;
+    private double _prevTwoFingerCenterX;
+    private double _prevTwoFingerCenterY;
+    private bool _transformChangedInSession;
+
+    // Outside double-tap tracking
+    private long _lastOutsideTapTick;
+    private double _lastOutsideTapX;
+    private double _lastOutsideTapY;
+
+    // Key border feedback tracking
+    private string? _currentEnteredKeyId;
+
+    // Low-level mouse and keyboard hooks to block mouse movement, clicks, and gesture zoom/scroll wheels
     private IntPtr _mouseHookHandle = IntPtr.Zero;
+    private IntPtr _keyboardHookHandle = IntPtr.Zero;
     private readonly NativeMethods.LowLevelMouseProc _mouseProcDelegate;
+    private readonly NativeMethods.LowLevelKeyboardProc _keyboardProcDelegate;
     private long _suppressClickUntilTick;
+    private long _suppressWheelUntilTick;
 
     public volatile bool IsNumpadActive;
     public bool IsTouchpadDetected { get; private set; }
 
     public event Action? ActivateSwipeDetected;
     public event Action? DeactivateSwipeDetected;
-    public event Action<double, double>? TouchPointPreview;
+    public event Action<double, double, bool>? TouchPointPreview; // localX, localY, isInside
     public event Action? TouchPreviewCancelled;
-    public event Action<double, double>? NumpadTapDetected;
-    public event Action<double, double>? EdgeExitToMouseModeDetected;
+    public event Action<double, double>? NumpadTapDetected;       // localX, localY
+    public event Action<double, double>? EdgeExitToMouseModeDetected; // rawX, rawY
+    public event Action<double, double>? OutsideDoubleTapDetected;    // rawX, rawY
+    public event Action? TransformUpdated;
+    public event Action<double, double, double, double>? MultiTouchPreview; // p1RawX, p1RawY, p2RawX, p2RawY
+    public event Action? MultiTouchEnded;
 
-    public TouchpadInputService()
+    public TouchpadInputService(AppSettings settings, FeedbackService feedbackService)
     {
+        _settings = settings;
+        _feedbackService = feedbackService;
         _mouseProcDelegate = MouseHookCallback;
+        _keyboardProcDelegate = KeyboardHookCallback;
         _liftWatchdogTimer = new Timer(OnLiftWatchdogTick, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public bool Initialize(IntPtr hwnd)
     {
         InstallMouseHook();
+        InstallKeyboardHook();
 
         var rid = new NativeMethods.RAWINPUTDEVICE[]
         {
@@ -107,6 +145,48 @@ public sealed class TouchpadInputService : IDisposable
             0);
     }
 
+    private void InstallKeyboardHook()
+    {
+        if (_keyboardHookHandle != IntPtr.Zero)
+            return;
+
+        IntPtr hMod = NativeMethods.GetModuleHandle(null);
+        _keyboardHookHandle = NativeMethods.SetWindowsHookEx(
+            NativeMethods.WH_KEYBOARD_LL,
+            _keyboardProcDelegate,
+            hMod,
+            0);
+    }
+
+    private void UninstallKeyboardHook()
+    {
+        if (_keyboardHookHandle != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_keyboardHookHandle);
+            _keyboardHookHandle = IntPtr.Zero;
+        }
+    }
+
+    private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            long now = Environment.TickCount64;
+
+            // While in two-finger gesture or right after it, suppress system synthetic Ctrl key (zoom modifier)
+            if (IsNumpadActive && (_isTwoFingerGestureActive || now <= _suppressWheelUntilTick))
+            {
+                var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
+                if (kb.vkCode is 0x11 or 0xA2 or 0xA3) // VK_CONTROL, VK_LCONTROL, VK_RCONTROL
+                {
+                    return new IntPtr(1);
+                }
+            }
+        }
+
+        return NativeMethods.CallNextHookEx(_keyboardHookHandle, nCode, wParam, lParam);
+    }
+
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0)
@@ -114,7 +194,7 @@ public sealed class TouchpadInputService : IDisposable
             uint msg = (uint)wParam;
             long now = Environment.TickCount64;
 
-            // While in Numpad Mode, suppress all touchpad/mouse movement and button clicks
+            // While in Numpad Mode, suppress ALL mouse movements, button clicks, and scroll/zoom wheels
             if (IsNumpadActive)
             {
                 if (msg is NativeMethods.WM_MOUSEMOVE
@@ -122,14 +202,23 @@ public sealed class TouchpadInputService : IDisposable
                     or NativeMethods.WM_LBUTTONUP
                     or NativeMethods.WM_LBUTTONDBLCLK
                     or NativeMethods.WM_RBUTTONDOWN
-                    or NativeMethods.WM_RBUTTONUP)
+                    or NativeMethods.WM_RBUTTONUP
+                    or NativeMethods.WM_RBUTTONDBLCLK
+                    or NativeMethods.WM_MBUTTONDOWN
+                    or NativeMethods.WM_MBUTTONUP
+                    or NativeMethods.WM_MBUTTONDBLCLK
+                    or NativeMethods.WM_MOUSEWHEEL
+                    or NativeMethods.WM_MOUSEHWHEEL)
                 {
                     return new IntPtr(1);
                 }
             }
-            else if (now <= _suppressClickUntilTick)
+            else if (now <= _suppressClickUntilTick || now <= _suppressWheelUntilTick)
             {
-                if (msg is NativeMethods.WM_LBUTTONDOWN or NativeMethods.WM_LBUTTONUP)
+                if (msg is NativeMethods.WM_LBUTTONDOWN 
+                    or NativeMethods.WM_LBUTTONUP
+                    or NativeMethods.WM_MOUSEWHEEL
+                    or NativeMethods.WM_MOUSEHWHEEL)
                 {
                     return new IntPtr(1);
                 }
@@ -239,12 +328,16 @@ public sealed class TouchpadInputService : IDisposable
                         link.HasX = true;
                         link.MinX = vc.LogicalMin;
                         link.MaxX = vc.LogicalMax > vc.LogicalMin ? vc.LogicalMax : 1;
+                        link.PhysicalMinX = vc.PhysicalMin;
+                        link.PhysicalMaxX = vc.PhysicalMax;
                     }
                     else if (vc.UsageMin == NativeMethods.HID_USAGE_GENERIC_Y)
                     {
                         link.HasY = true;
                         link.MinY = vc.LogicalMin;
                         link.MaxY = vc.LogicalMax > vc.LogicalMin ? vc.LogicalMax : 1;
+                        link.PhysicalMinY = vc.PhysicalMin;
+                        link.PhysicalMaxY = vc.PhysicalMax;
                     }
                 }
             }
@@ -281,7 +374,21 @@ public sealed class TouchpadInputService : IDisposable
                 }
             }
 
-            var info = new CachedDeviceInfo(preparsedData, contactLinks);
+            // Calculate actual aspect ratio
+            var primaryLink = contactLinks[0];
+            double width = (primaryLink.PhysicalMaxX > primaryLink.PhysicalMinX)
+                ? (primaryLink.PhysicalMaxX - primaryLink.PhysicalMinX)
+                : (primaryLink.MaxX - primaryLink.MinX);
+
+            double height = (primaryLink.PhysicalMaxY > primaryLink.PhysicalMinY)
+                ? (primaryLink.PhysicalMaxY - primaryLink.PhysicalMinY)
+                : (primaryLink.MaxY - primaryLink.MinY);
+
+            double aspect = (width > 0 && height > 0) ? (width / height) : (16.0 / 10.0);
+            TouchpadAspectRatio = Math.Clamp(aspect, 1.15, 2.4);
+            TouchpadAspectRatioChanged?.Invoke(TouchpadAspectRatio);
+
+            var info = new CachedDeviceInfo(preparsedData, contactLinks, TouchpadAspectRatio);
             _deviceCache[hDevice] = info;
             success = true;
             return info;
@@ -429,20 +536,46 @@ public sealed class TouchpadInputService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Transforms normalized raw touchpad coordinate (0..1) to local numpad unit coordinate (0..1)
+    /// accounting for user-configured Scale, Rotation Angle, and Center offset with aspect ratio preservation.
+    /// </summary>
+    public (double localX, double localY, bool isInside) TransformToLocal(double rawX, double rawY)
+    {
+        double cx = _settings.NumpadCenterX;
+        double cy = _settings.NumpadCenterY;
+        double scale = Math.Max(0.2, _settings.NumpadScale);
+        double rad = -_settings.NumpadAngle * (Math.PI / 180.0); // Inverse rotation
+
+        double ar = TouchpadAspectRatio > 0 ? TouchpadAspectRatio : 1.5;
+        double dx = (rawX - cx) * ar;
+        double dy = (rawY - cy);
+
+        double cos = Math.Cos(rad);
+        double sin = Math.Sin(rad);
+
+        double rx = dx * cos - dy * sin;
+        double ry = dx * sin + dy * cos;
+
+        double localX = (rx / ar) / scale + 0.5;
+        double localY = ry / scale + 0.5;
+
+        bool isInside = localX >= 0.0 && localX <= 1.0 && localY >= 0.0 && localY <= 1.0;
+        return (localX, localY, isInside);
+    }
+
     private void ProcessContactFrame(List<TouchpadContact> contacts, bool physicalButtonPressed)
     {
-        int activeCount = 0;
-        TouchpadContact primaryActive = default;
-
+        var activeContacts = new List<TouchpadContact>(contacts.Count);
         for (int i = 0; i < contacts.Count; i++)
         {
             if (contacts[i].TipSwitch && contacts[i].Confidence)
             {
-                if (activeCount == 0)
-                    primaryActive = contacts[i];
-                activeCount++;
+                activeContacts.Add(contacts[i]);
             }
         }
+
+        int activeCount = activeContacts.Count;
 
         if (activeCount > 0)
         {
@@ -453,11 +586,110 @@ public sealed class TouchpadInputService : IDisposable
             _liftWatchdogTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
-        if (activeCount >= 1)
+        long now = Environment.TickCount64;
+
+        // -------------------------------------------------------------
+        // Case A: 2 Fingers -> Adaptive Transform Gesture (Pinch, Rotate, Drag)
+        // -------------------------------------------------------------
+        if (activeCount >= 2 && IsNumpadActive)
         {
-            double x = primaryActive.NormalizedX;
-            double y = primaryActive.NormalizedY;
-            long now = Environment.TickCount64;
+            var p1 = activeContacts[0];
+            var p2 = activeContacts[1];
+
+            double midX = (p1.NormalizedX + p2.NormalizedX) / 2.0;
+            double midY = (p1.NormalizedY + p2.NormalizedY) / 2.0;
+
+            double ar = TouchpadAspectRatio > 0 ? TouchpadAspectRatio : 1.5;
+            double dx = (p2.NormalizedX - p1.NormalizedX) * ar;
+            double dy = p2.NormalizedY - p1.NormalizedY;
+            double dist = Math.Sqrt(dx * dx + dy * dy);
+            double angleRad = Math.Atan2(dy, dx);
+
+            if (!_isTwoFingerGestureActive)
+            {
+                _isTwoFingerGestureActive = true;
+                _prevTwoFingerDist = dist;
+                _prevTwoFingerAngleRad = angleRad;
+                _prevTwoFingerCenterX = midX;
+                _prevTwoFingerCenterY = midY;
+                _transformChangedInSession = false;
+                TouchPreviewCancelled?.Invoke();
+            }
+            else
+            {
+                // Scale (pinch)
+                if (_prevTwoFingerDist > 0.02 && dist > 0.02)
+                {
+                    double scaleRatio = dist / _prevTwoFingerDist;
+                    double newScale = Math.Clamp(_settings.NumpadScale * scaleRatio, 0.40, 1.0);
+                    if (Math.Abs(newScale - _settings.NumpadScale) > 0.002)
+                    {
+                        _settings.NumpadScale = newScale;
+                        _transformChangedInSession = true;
+                    }
+                }
+
+                // Rotation angle
+                double angleDeltaRad = angleRad - _prevTwoFingerAngleRad;
+                // Normalize wrap-around (-PI .. PI)
+                while (angleDeltaRad > Math.PI) angleDeltaRad -= 2.0 * Math.PI;
+                while (angleDeltaRad < -Math.PI) angleDeltaRad += 2.0 * Math.PI;
+
+                double angleDeltaDeg = angleDeltaRad * (180.0 / Math.PI);
+                double newAngle = Math.Clamp(_settings.NumpadAngle + angleDeltaDeg, -45.0, 45.0);
+                if (Math.Abs(newAngle - _settings.NumpadAngle) > 0.15)
+                {
+                    _settings.NumpadAngle = newAngle;
+                    _transformChangedInSession = true;
+                }
+
+                // Center position offset (two-finger pan/drag)
+                double deltaCx = midX - _prevTwoFingerCenterX;
+                double deltaCy = midY - _prevTwoFingerCenterY;
+                if (Math.Abs(deltaCx) > 0.001 || Math.Abs(deltaCy) > 0.001)
+                {
+                    _settings.NumpadCenterX = Math.Clamp(_settings.NumpadCenterX + deltaCx, 0.15, 0.85);
+                    _settings.NumpadCenterY = Math.Clamp(_settings.NumpadCenterY + deltaCy, 0.15, 0.85);
+                    _transformChangedInSession = true;
+                }
+
+                _prevTwoFingerDist = dist;
+                _prevTwoFingerAngleRad = angleRad;
+                _prevTwoFingerCenterX = midX;
+                _prevTwoFingerCenterY = midY;
+
+                MultiTouchPreview?.Invoke(p1.NormalizedX, p1.NormalizedY, p2.NormalizedX, p2.NormalizedY);
+
+                if (_transformChangedInSession)
+                {
+                    TransformUpdated?.Invoke();
+                }
+            }
+
+            return;
+        }
+
+        // Lifted two-finger gesture
+        if (_isTwoFingerGestureActive && activeCount < 2)
+        {
+            _isTwoFingerGestureActive = false;
+            _suppressWheelUntilTick = Environment.TickCount64 + 350; // Suppress lingering inertia scroll events!
+            MultiTouchEnded?.Invoke();
+            if (_transformChangedInSession)
+            {
+                _settings.Save();
+                _transformChangedInSession = false;
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Case B: 1 Finger Active -> Normal Numpad Touch / Tap / Edge Exit
+        // -------------------------------------------------------------
+        if (activeCount == 1)
+        {
+            var primaryActive = activeContacts[0];
+            double rawX = primaryActive.NormalizedX;
+            double rawY = primaryActive.NormalizedY;
 
             if (!_inTouchSession)
             {
@@ -466,28 +698,39 @@ public sealed class TouchpadInputService : IDisposable
                 _edgeExitedThisSession = false;
                 _physicalClickSentThisSession = false;
                 _physicalButtonWasDown = physicalButtonPressed;
-                _startX = x;
-                _startY = y;
-                _lastX = x;
-                _lastY = y;
+                _startX = rawX;
+                _startY = rawY;
+                _lastX = rawX;
+                _lastY = rawY;
                 _maxDistance = 0.0;
                 _startTimeTick = now;
+                _currentEnteredKeyId = null;
 
-                _startedAtTopLeft = x <= LeftEdgeStartMaxX && y <= TopEdgeStartMaxY;
-                _startedAtTopRight = x >= RightEdgeStartMinX && y <= TopEdgeStartMaxY;
+                _startedAtTopLeft = rawX <= LeftEdgeStartMaxX && rawY <= TopEdgeStartMaxY;
+                _startedAtTopRight = rawX >= RightEdgeStartMinX && rawY <= TopEdgeStartMaxY;
 
                 if (IsNumpadActive)
                 {
-                    TouchPointPreview?.Invoke(x, y);
+                    var (u, v, isInside) = TransformToLocal(rawX, rawY);
+                    if (isInside)
+                    {
+                        var key = NumpadKeyMap.HitTestNormalized(u, v);
+                        if (key is not null)
+                        {
+                            _currentEnteredKeyId = key.Id;
+                            _feedbackService.KeyEntered(key);
+                        }
+                    }
+                    TouchPointPreview?.Invoke(u, v, isInside);
                 }
             }
             else
             {
-                _lastX = x;
-                _lastY = y;
+                _lastX = rawX;
+                _lastY = rawY;
 
-                double dx = x - _startX;
-                double dy = y - _startY;
+                double dx = rawX - _startX;
+                double dy = rawY - _startY;
                 double dist = Math.Sqrt(dx * dx + dy * dy);
                 if (dist > _maxDistance)
                     _maxDistance = dist;
@@ -495,7 +738,7 @@ public sealed class TouchpadInputService : IDisposable
                 // 1. Check top-edge open/close swipes
                 if (!_swipeTriggeredThisSession && !_edgeExitedThisSession)
                 {
-                    if (_startedAtTopLeft && y <= TopEdgeTrackMaxY && x >= RightEdgeStartMinX && (x - _startX) >= SwipeMinSpanX)
+                    if (_startedAtTopLeft && rawY <= TopEdgeTrackMaxY && rawX >= RightEdgeStartMinX && (rawX - _startX) >= SwipeMinSpanX)
                     {
                         _swipeTriggeredThisSession = true;
                         TouchPreviewCancelled?.Invoke();
@@ -503,7 +746,7 @@ public sealed class TouchpadInputService : IDisposable
                         return;
                     }
 
-                    if (_startedAtTopRight && y <= TopEdgeTrackMaxY && x <= LeftEdgeStartMaxX && (_startX - x) >= SwipeMinSpanX)
+                    if (_startedAtTopRight && rawY <= TopEdgeTrackMaxY && rawX <= LeftEdgeStartMaxX && (_startX - rawX) >= SwipeMinSpanX)
                     {
                         _swipeTriggeredThisSession = true;
                         TouchPreviewCancelled?.Invoke();
@@ -517,48 +760,79 @@ public sealed class TouchpadInputService : IDisposable
                     return;
                 }
 
-                // 2. Check if user dragged largely and reached the edge of the Numpad window -> switch to Mouse/Touchpad mode!
-                bool isAtOuterEdge = x <= EdgeBoundaryMargin
-                    || x >= (1.0 - EdgeBoundaryMargin)
-                    || y <= EdgeBoundaryMargin
-                    || y >= (1.0 - EdgeBoundaryMargin);
+                // 2. Large drag reaching outer edge of touchpad -> Edge Exit to Mouse mode
+                bool isAtOuterEdge = rawX <= EdgeBoundaryMargin
+                    || rawX >= (1.0 - EdgeBoundaryMargin)
+                    || rawY <= EdgeBoundaryMargin
+                    || rawY >= (1.0 - EdgeBoundaryMargin);
 
-                // Don't trigger edge-exit while in the middle of a top-right-to-left close swipe track
-                bool isTrackingTopRightCloseSwipe = _startedAtTopRight && y <= TopEdgeTrackMaxY && x < _startX;
+                bool isTrackingTopRightCloseSwipe = _startedAtTopRight && rawY <= TopEdgeTrackMaxY && rawX < _startX;
 
                 if (_maxDistance >= EdgeExitMinDragDistance && isAtOuterEdge && !isTrackingTopRightCloseSwipe)
                 {
                     _edgeExitedThisSession = true;
                     IsNumpadActive = false;
                     TouchPreviewCancelled?.Invoke();
-                    EdgeExitToMouseModeDetected?.Invoke(x, y);
+                    EdgeExitToMouseModeDetected?.Invoke(rawX, rawY);
                     return;
                 }
 
-                // 3. If physical touchpad button is clicked while resting/aiming finger in Numpad mode, send the key
+                // 3. Physical button click while aiming finger
+                var (localX, localY, isInside) = TransformToLocal(rawX, rawY);
+
                 if (physicalButtonPressed && !_physicalButtonWasDown)
                 {
                     _physicalButtonWasDown = true;
                     _physicalClickSentThisSession = true;
                     _suppressClickUntilTick = now + 200;
-                    NumpadTapDetected?.Invoke(x, y);
+
+                    if (isInside)
+                    {
+                        var key = NumpadKeyMap.HitTestNormalized(localX, localY);
+                        if (key is not null)
+                        {
+                            _feedbackService.KeyCommitted();
+                            NumpadTapDetected?.Invoke(localX, localY);
+                        }
+                    }
+                    else
+                    {
+                        // Outside physical click: check double click to mouse mode
+                        CheckOutsideDoubleTap(rawX, rawY, now);
+                    }
                 }
                 else if (!physicalButtonPressed && _physicalButtonWasDown)
                 {
                     _physicalButtonWasDown = false;
                 }
 
-                // 4. Continuously display the finger's resting position on the Numpad window
-                TouchPointPreview?.Invoke(x, y);
+                // 4. Key boundary feedback during slide
+                if (isInside)
+                {
+                    var hitKey = NumpadKeyMap.HitTestNormalized(localX, localY);
+                    string? newKeyId = hitKey?.Id;
+                    if (newKeyId != _currentEnteredKeyId && hitKey is not null)
+                    {
+                        _currentEnteredKeyId = newKeyId;
+                        _feedbackService.KeyEntered(hitKey);
+                    }
+                }
+                else
+                {
+                    _currentEnteredKeyId = null;
+                }
+
+                TouchPointPreview?.Invoke(localX, localY, isInside);
             }
 
             return;
         }
 
-        // All fingers lifted (activeCount == 0)
+        // -------------------------------------------------------------
+        // Case C: All fingers lifted (activeCount == 0)
+        // -------------------------------------------------------------
         if (_inTouchSession)
         {
-            long now = Environment.TickCount64;
             long elapsedMs = now - _startTimeTick;
 
             if (IsNumpadActive
@@ -568,8 +842,23 @@ public sealed class TouchpadInputService : IDisposable
                 && _maxDistance <= TapMaxMovement
                 && elapsedMs <= MaxTapDurationMs)
             {
-                _suppressClickUntilTick = now + 150;
-                NumpadTapDetected?.Invoke(_lastX, _lastY);
+                var (localX, localY, isInside) = TransformToLocal(_lastX, _lastY);
+                if (isInside)
+                {
+                    var hitKey = NumpadKeyMap.HitTestNormalized(localX, localY);
+                    if (hitKey is not null)
+                    {
+                        _suppressClickUntilTick = now + 150;
+                        _feedbackService.KeyCommitted();
+                        NumpadTapDetected?.Invoke(localX, localY);
+                    }
+                }
+                else
+                {
+                    // User tapped outside the numpad area:
+                    // Single tap is IGNORED (palm rejection), double tap exits to mouse mode!
+                    CheckOutsideDoubleTap(_lastX, _lastY, now);
+                }
             }
             else
             {
@@ -581,12 +870,39 @@ public sealed class TouchpadInputService : IDisposable
             _edgeExitedThisSession = false;
             _physicalClickSentThisSession = false;
             _physicalButtonWasDown = false;
+            _currentEnteredKeyId = null;
+        }
+    }
+
+    private void CheckOutsideDoubleTap(double rawX, double rawY, long now)
+    {
+        long interval = now - _lastOutsideTapTick;
+        double dx = rawX - _lastOutsideTapX;
+        double dy = rawY - _lastOutsideTapY;
+        double dist = Math.Sqrt(dx * dx + dy * dy);
+
+        if (interval <= OutsideDoubleTapMaxIntervalMs && dist <= OutsideDoubleTapMaxDist)
+        {
+            // Double-tap outside confirmed -> Turn off numpad window and switch to mouse mode!
+            _lastOutsideTapTick = 0;
+            IsNumpadActive = false;
+            TouchPreviewCancelled?.Invoke();
+            OutsideDoubleTapDetected?.Invoke(rawX, rawY);
+        }
+        else
+        {
+            // First tap outside -> Ignore and record timestamp
+            _lastOutsideTapTick = now;
+            _lastOutsideTapX = rawX;
+            _lastOutsideTapY = rawY;
+            TouchPreviewCancelled?.Invoke();
         }
     }
 
     public void Dispose()
     {
         _liftWatchdogTimer.Dispose();
+        UninstallKeyboardHook();
 
         if (_mouseHookHandle != IntPtr.Zero)
         {
@@ -611,12 +927,17 @@ public sealed class TouchpadInputService : IDisposable
         public int MaxX { get; set; } = 1;
         public int MinY { get; set; }
         public int MaxY { get; set; } = 1;
+        public int PhysicalMinX { get; set; }
+        public int PhysicalMaxX { get; set; }
+        public int PhysicalMinY { get; set; }
+        public int PhysicalMaxY { get; set; }
     }
 
-    private sealed class CachedDeviceInfo(IntPtr preparsedData, List<ContactLinkInfo> contactLinks) : IDisposable
+    private sealed class CachedDeviceInfo(IntPtr preparsedData, List<ContactLinkInfo> contactLinks, double aspectRatio) : IDisposable
     {
         public IntPtr PreparsedData { get; } = preparsedData;
         public List<ContactLinkInfo> ContactLinks { get; } = contactLinks;
+        public double AspectRatio { get; } = aspectRatio;
 
         public void Dispose()
         {

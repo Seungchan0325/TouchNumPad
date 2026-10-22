@@ -36,6 +36,17 @@ public sealed class AppSettings
     // Default: 'N' (0x4E)
     public uint HotkeyVirtualKey { get; set; } = 0x4E;
 
+    // Feedback Settings
+    public bool EnableHaptics { get; set; } = true;
+    public bool EnableSound { get; set; } = true;
+    public double SoundVolume { get; set; } = 0.75;
+
+    // Touchpad Adaptive Transform Settings
+    public double NumpadScale { get; set; } = 1.0;
+    public double NumpadAngle { get; set; } = 0.0; // Degrees (-45.0 .. +45.0)
+    public double NumpadCenterX { get; set; } = 0.5;
+    public double NumpadCenterY { get; set; } = 0.5;
+
     // Saved window position
     public int? WindowX { get; set; }
     public int? WindowY { get; set; }
@@ -51,6 +62,12 @@ public sealed class AppSettings
                 if (loaded is not null)
                 {
                     loaded.WindowOpacity = Math.Clamp(loaded.WindowOpacity, 0.25, 1.0);
+                    loaded.SoundVolume = Math.Clamp(loaded.SoundVolume, 0.0, 1.0);
+                    loaded.NumpadScale = Math.Clamp(loaded.NumpadScale, 0.4, 1.0);
+                    loaded.NumpadAngle = Math.Clamp(loaded.NumpadAngle, -45.0, 45.0);
+                    loaded.NumpadCenterX = Math.Clamp(loaded.NumpadCenterX, 0.1, 0.9);
+                    loaded.NumpadCenterY = Math.Clamp(loaded.NumpadCenterY, 0.1, 0.9);
+
                     if (loaded.HotkeyVirtualKey == 0)
                     {
                         loaded.HotkeyModifiers = 0x0001 | 0x0004;
@@ -80,6 +97,15 @@ public sealed class AppSettings
         {
             // Ignore write errors
         }
+    }
+
+    public void ResetTransform()
+    {
+        NumpadScale = 1.0;
+        NumpadAngle = 0.0;
+        NumpadCenterX = 0.5;
+        NumpadCenterY = 0.5;
+        Save();
     }
 
     public string GetHotkeyDisplayText()

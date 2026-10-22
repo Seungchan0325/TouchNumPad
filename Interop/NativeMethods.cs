@@ -19,6 +19,12 @@ internal static class NativeMethods
     public const uint WM_LBUTTONDBLCLK = 0x0203;
     public const uint WM_RBUTTONDOWN = 0x0204;
     public const uint WM_RBUTTONUP = 0x0205;
+    public const uint WM_RBUTTONDBLCLK = 0x0206;
+    public const uint WM_MBUTTONDOWN = 0x0207;
+    public const uint WM_MBUTTONUP = 0x0208;
+    public const uint WM_MBUTTONDBLCLK = 0x0209;
+    public const uint WM_MOUSEWHEEL = 0x020A;
+    public const uint WM_MOUSEHWHEEL = 0x020E;
     public const uint WM_CONTEXTMENU = 0x007B;
 
     public const int MA_NOACTIVATE = 3;
@@ -565,6 +571,15 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("winmm.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PlaySound(byte[]? ptrToSound, IntPtr hmod, uint fdwSound);
+
+    public const uint SND_ASYNC = 0x0001;
+    public const uint SND_NODEFAULT = 0x0002;
+    public const uint SND_MEMORY = 0x0004;
+    public const uint SND_PURGE = 0x0040;
 
     [DllImport("ole32.dll", ExactSpelling = true)]
     public static extern int CoCreateInstance(
