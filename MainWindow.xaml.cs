@@ -96,9 +96,9 @@ public sealed partial class MainWindow : Window
         _touchpadService.TouchpadAspectRatioChanged += aspect => DispatcherQueue.TryEnqueue(() => ResizeWindowToAspectRatio(aspect));
         _touchpadService.ActivateSwipeDetected += () => DispatcherQueue.TryEnqueue(ShowNumpadWindow);
         _touchpadService.DeactivateSwipeDetected += () => DispatcherQueue.TryEnqueue(HideNumpadWindow);
-        _touchpadService.TouchPointPreview += (lx, ly, inside) => DispatcherQueue.TryEnqueue(() => OnTouchPointPreview(lx, ly, inside));
+        _touchpadService.TouchPointPreview += (rx, ry, lx, ly, inside) => DispatcherQueue.TryEnqueue(() => OnTouchPointPreview(rx, ry, lx, ly, inside));
         _touchpadService.TouchPreviewCancelled += () => DispatcherQueue.TryEnqueue(HideTouchIndicator);
-        _touchpadService.NumpadTapDetected += (lx, ly) => DispatcherQueue.TryEnqueue(() => OnNumpadTap(lx, ly));
+        _touchpadService.NumpadTapDetected += (rx, ry, lx, ly) => DispatcherQueue.TryEnqueue(() => OnNumpadTap(rx, ry, lx, ly));
         _touchpadService.EdgeExitToMouseModeDetected += (rx, ry) => DispatcherQueue.TryEnqueue(() => ExitToMouseMode(rx, ry));
         _touchpadService.OutsideDoubleTapDetected += (rx, ry) => DispatcherQueue.TryEnqueue(() =>
         {
@@ -178,10 +178,15 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyNumpadBoardTransform()
     {
-        double width = RootGrid.ActualWidth;
-        double height = RootGrid.ActualHeight;
+        double width = NumpadBoard.ActualWidth;
+        double height = NumpadBoard.ActualHeight;
         if (width <= 0 || height <= 0)
-            return;
+        {
+            width = RootGrid.ActualWidth;
+            height = RootGrid.ActualHeight;
+            if (width <= 0 || height <= 0)
+                return;
+        }
 
         double centerX = width / 2.0;
         double centerY = height / 2.0;
@@ -491,7 +496,7 @@ public sealed partial class MainWindow : Window
 
         if (sender is Border border && border.Tag is NumpadKeyDefinition key)
         {
-            var pt = e.GetCurrentPoint(KeysGrid).Position;
+            var pt = e.GetCurrentPoint(TouchOverlayCanvas).Position;
             ShowTouchIndicatorAtCanvasPoint(pt.X, pt.Y);
             SetHighlightedKey(key.Id);
             _feedbackService.KeyCommitted();
@@ -622,44 +627,56 @@ public sealed partial class MainWindow : Window
     }
 
     // Touchpad touch events
-    private void OnTouchPointPreview(double localX, double localY, bool isInside)
+    private void OnTouchPointPreview(double rawX, double rawY, double localX, double localY, bool isInside)
     {
         if (!_isNumpadVisible || !_isNumpadMode || _settingsWindow is not null)
             return;
 
         _indicatorHideTimer.Stop();
 
-        if (!isInside)
+        double width = TouchOverlayCanvas.ActualWidth;
+        double height = TouchOverlayCanvas.ActualHeight;
+        if (width <= 0 || height <= 0)
         {
-            HideTouchIndicator();
-            return;
+            width = RootGrid.ActualWidth;
+            height = RootGrid.ActualHeight;
+            if (width <= 0 || height <= 0)
+                return;
         }
 
-        double width = KeysGrid.ActualWidth;
-        double height = KeysGrid.ActualHeight;
-        if (width <= 0 || height <= 0)
-            return;
-
-        double canvasX = Math.Clamp(localX, 0.0, 1.0) * width;
-        double canvasY = Math.Clamp(localY, 0.0, 1.0) * height;
+        double canvasX = Math.Clamp(rawX, 0.0, 1.0) * width;
+        double canvasY = Math.Clamp(rawY, 0.0, 1.0) * height;
 
         ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY);
 
-        var hitKey = NumpadKeyMap.HitTestNormalized(localX, localY);
-        SetHighlightedKey(hitKey?.Id);
+        if (isInside)
+        {
+            var hitKey = NumpadKeyMap.HitTestNormalized(localX, localY);
+            SetHighlightedKey(hitKey?.Id);
+        }
+        else
+        {
+            SetHighlightedKey(null);
+        }
     }
 
-    private void OnNumpadTap(double localX, double localY)
+    private void OnNumpadTap(double rawX, double rawY, double localX, double localY)
     {
         if (!_isNumpadVisible || !_isNumpadMode || _settingsWindow is not null)
             return;
 
-        double width = KeysGrid.ActualWidth;
-        double height = KeysGrid.ActualHeight;
+        double width = TouchOverlayCanvas.ActualWidth;
+        double height = TouchOverlayCanvas.ActualHeight;
+        if (width <= 0 || height <= 0)
+        {
+            width = RootGrid.ActualWidth;
+            height = RootGrid.ActualHeight;
+        }
+
         if (width > 0 && height > 0)
         {
-            double canvasX = Math.Clamp(localX, 0.0, 1.0) * width;
-            double canvasY = Math.Clamp(localY, 0.0, 1.0) * height;
+            double canvasX = Math.Clamp(rawX, 0.0, 1.0) * width;
+            double canvasY = Math.Clamp(rawY, 0.0, 1.0) * height;
             ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY);
         }
 
@@ -692,10 +709,15 @@ public sealed partial class MainWindow : Window
     {
         _multiTouchHideTimer.Stop();
 
-        double width = RootGrid.ActualWidth;
-        double height = RootGrid.ActualHeight;
+        double width = MultiTouchCanvas.ActualWidth;
+        double height = MultiTouchCanvas.ActualHeight;
         if (width <= 0 || height <= 0)
-            return;
+        {
+            width = RootGrid.ActualWidth;
+            height = RootGrid.ActualHeight;
+            if (width <= 0 || height <= 0)
+                return;
+        }
 
         MultiTouchCanvas.Opacity = 1.0;
 

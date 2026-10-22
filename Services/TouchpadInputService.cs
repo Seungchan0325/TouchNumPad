@@ -98,9 +98,9 @@ public sealed class TouchpadInputService : IDisposable
 
     public event Action? ActivateSwipeDetected;
     public event Action? DeactivateSwipeDetected;
-    public event Action<double, double, bool>? TouchPointPreview; // localX, localY, isInside
+    public event Action<double, double, double, double, bool>? TouchPointPreview; // rawX, rawY, localX, localY, isInside
     public event Action? TouchPreviewCancelled;
-    public event Action<double, double>? NumpadTapDetected;       // localX, localY
+    public event Action<double, double, double, double>? NumpadTapDetected;       // rawX, rawY, localX, localY
     public event Action<double, double>? EdgeExitToMouseModeDetected; // rawX, rawY
     public event Action<double, double>? OutsideDoubleTapDetected;    // rawX, rawY
     public event Action? TransformUpdated;
@@ -777,7 +777,7 @@ public sealed class TouchpadInputService : IDisposable
                             _feedbackService.KeyEntered(key);
                         }
                     }
-                    TouchPointPreview?.Invoke(u, v, isInside);
+                    TouchPointPreview?.Invoke(rawX, rawY, u, v, isInside);
                 }
             }
             else
@@ -848,7 +848,7 @@ public sealed class TouchpadInputService : IDisposable
                         if (key is not null)
                         {
                             _feedbackService.KeyCommitted();
-                            NumpadTapDetected?.Invoke(localX, localY);
+                            NumpadTapDetected?.Invoke(rawX, rawY, localX, localY);
                         }
                     }
                     else
@@ -878,7 +878,7 @@ public sealed class TouchpadInputService : IDisposable
                     _currentEnteredKeyId = null;
                 }
 
-                TouchPointPreview?.Invoke(localX, localY, isInside);
+                TouchPointPreview?.Invoke(rawX, rawY, localX, localY, isInside);
             }
 
             return;
@@ -906,7 +906,11 @@ public sealed class TouchpadInputService : IDisposable
                     {
                         _suppressClickUntilTick = now + 150;
                         _feedbackService.KeyCommitted();
-                        NumpadTapDetected?.Invoke(localX, localY);
+                        NumpadTapDetected?.Invoke(_lastX, _lastY, localX, localY);
+                    }
+                    else
+                    {
+                        TouchPreviewCancelled?.Invoke();
                     }
                 }
                 else
