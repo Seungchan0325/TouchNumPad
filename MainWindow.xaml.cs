@@ -36,13 +36,6 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, Border> _keyBorders = new();
     private readonly DispatcherTimer _indicatorHideTimer;
     private readonly DispatcherTimer _multiTouchHideTimer;
-    private readonly DispatcherTimer _rippleAnimationTimer;
-
-    private readonly OneEuroFilter _indicatorFilterX = new(minCutoff: 3.5, beta: 0.15);
-    private readonly OneEuroFilter _indicatorFilterY = new(minCutoff: 3.5, beta: 0.15);
-    private bool _isIndicatorActive;
-    private int _rippleFrame;
-    private const int RippleTotalFrames = 12; // 12 * 16ms = ~192ms
 
     private bool _isNumpadVisible;
     private bool _isNumpadMode;
@@ -80,32 +73,6 @@ public sealed partial class MainWindow : Window
         {
             _multiTouchHideTimer.Stop();
             MultiTouchCanvas.Opacity = 0.0;
-        };
-
-        _rippleAnimationTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(16)
-        };
-        _rippleAnimationTimer.Tick += (_, _) =>
-        {
-            _rippleFrame++;
-            double progress = (double)_rippleFrame / RippleTotalFrames;
-            if (progress >= 1.0)
-            {
-                _rippleAnimationTimer.Stop();
-                TouchIndicatorCircle.Opacity = 0.0;
-                IndicatorRippleRing.Opacity = 0.0;
-                SetHighlightedKey(null);
-                _isIndicatorActive = false;
-            }
-            else
-            {
-                double easeOut = 1.0 - Math.Pow(1.0 - progress, 2);
-                RippleScaleTransform.ScaleX = 1.0 + 0.85 * easeOut;
-                RippleScaleTransform.ScaleY = 1.0 + 0.85 * easeOut;
-                IndicatorRippleRing.Opacity = Math.Max(0.0, 0.9 * (1.0 - easeOut));
-                TouchIndicatorCircle.Opacity = Math.Max(0.0, 1.0 - easeOut * 0.9);
-            }
         };
 
         InitializeComponent();
@@ -552,13 +519,15 @@ public sealed partial class MainWindow : Window
             _feedbackService.KeyCommitted();
             KeyboardInjector.SendKey(key);
 
-            StartCommitRippleAnimation();
+            _indicatorHideTimer.Stop();
+            _indicatorHideTimer.Start();
             e.Handled = true;
         }
         else
         {
             _pressedKeyCard = null;
-            HideTouchIndicator();
+            _indicatorHideTimer.Stop();
+            _indicatorHideTimer.Start();
         }
     }
 
@@ -678,8 +647,7 @@ public sealed partial class MainWindow : Window
         if (!_isNumpadVisible || !_isNumpadMode || (_settingsWindow is not null && _settingsWindow.IsRecordingHotkey))
             return;
 
-        _rippleAnimationTimer.Stop();
-        IndicatorRippleRing.Opacity = 0.0;
+        _indicatorHideTimer.Stop();
 
         double width = TouchOverlayCanvas.ActualWidth;
         double height = TouchOverlayCanvas.ActualHeight;
@@ -691,28 +659,10 @@ public sealed partial class MainWindow : Window
                 return;
         }
 
-        double targetCanvasX = Math.Clamp(rawX, 0.0, 1.0) * width;
-        double targetCanvasY = Math.Clamp(rawY, 0.0, 1.0) * height;
+        double canvasX = Math.Clamp(rawX, 0.0, 1.0) * width;
+        double canvasY = Math.Clamp(rawY, 0.0, 1.0) * height;
 
-        long now = Environment.TickCount64;
-        double canvasX, canvasY;
-        if (!_isIndicatorActive)
-        {
-            _isIndicatorActive = true;
-            _indicatorFilterX.Reset();
-            _indicatorFilterY.Reset();
-            canvasX = targetCanvasX;
-            canvasY = targetCanvasY;
-            _indicatorFilterX.Filter(canvasX, now);
-            _indicatorFilterY.Filter(canvasY, now);
-        }
-        else
-        {
-            canvasX = _indicatorFilterX.Filter(targetCanvasX, now);
-            canvasY = _indicatorFilterY.Filter(targetCanvasY, now);
-        }
-
-        ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY, isInside);
+        ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY);
 
         if (isInside)
         {
@@ -742,7 +692,7 @@ public sealed partial class MainWindow : Window
         {
             double canvasX = Math.Clamp(rawX, 0.0, 1.0) * width;
             double canvasY = Math.Clamp(rawY, 0.0, 1.0) * height;
-            ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY, isInside: true);
+            ShowTouchIndicatorAtCanvasPoint(canvasX, canvasY);
         }
 
         var hitKey = NumpadKeyMap.HitTestNormalized(localX, localY);
@@ -752,50 +702,21 @@ public sealed partial class MainWindow : Window
             KeyboardInjector.SendKey(hitKey);
         }
 
-        StartCommitRippleAnimation();
+        _indicatorHideTimer.Stop();
+        _indicatorHideTimer.Start();
     }
 
-    private void StartCommitRippleAnimation()
-    {
-        _rippleFrame = 0;
-        RippleScaleTransform.ScaleX = 1.0;
-        RippleScaleTransform.ScaleY = 1.0;
-        IndicatorRippleRing.Opacity = 0.9;
-        _rippleAnimationTimer.Stop();
-        _rippleAnimationTimer.Start();
-    }
-
-    private void ShowTouchIndicatorAtCanvasPoint(double canvasX, double canvasY, bool isInside = true)
+    private void ShowTouchIndicatorAtCanvasPoint(double canvasX, double canvasY)
     {
         double radius = TouchIndicatorCircle.Width / 2.0;
         Canvas.SetLeft(TouchIndicatorCircle, canvasX - radius);
         Canvas.SetTop(TouchIndicatorCircle, canvasY - radius);
-
-        TouchIndicatorCircle.Opacity = 1.0;
-
-        if (isInside)
-        {
-            IndicatorScaleTransform.ScaleX = 1.0;
-            IndicatorScaleTransform.ScaleY = 1.0;
-            IndicatorPuckRim.Opacity = 0.95;
-            IndicatorCorePip.Opacity = 1.0;
-        }
-        else
-        {
-            // Softer, slightly contracted presence when hovering outside keys
-            IndicatorScaleTransform.ScaleX = 0.88;
-            IndicatorScaleTransform.ScaleY = 0.88;
-            IndicatorPuckRim.Opacity = 0.50;
-            IndicatorCorePip.Opacity = 0.60;
-        }
+        TouchIndicatorCircle.Visibility = Visibility.Visible;
     }
 
     private void HideTouchIndicator()
     {
-        _rippleAnimationTimer.Stop();
-        TouchIndicatorCircle.Opacity = 0.0;
-        IndicatorRippleRing.Opacity = 0.0;
-        _isIndicatorActive = false;
+        TouchIndicatorCircle.Visibility = Visibility.Collapsed;
         SetHighlightedKey(null);
     }
 
