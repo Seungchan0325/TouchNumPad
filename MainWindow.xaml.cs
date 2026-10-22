@@ -105,11 +105,13 @@ public sealed partial class MainWindow : Window
             ExitToMouseMode(rx, ry);
             HideNumpadWindow();
         });
-        _touchpadService.IsNumpadVisibleCheck = () => _isNumpadVisible && (_settingsWindow is null || !_settingsWindow.IsRecordingHotkey);
         _touchpadService.EscapeKeyPressed += () => DispatcherQueue.TryEnqueue(() =>
         {
-            ExitToMouseMode();
-            HideNumpadWindow();
+            if (_isNumpadMode)
+            {
+                ExitToMouseMode();
+                HideNumpadWindow();
+            }
         });
         _touchpadService.TransformUpdated += () => DispatcherQueue.TryEnqueue(ApplyNumpadBoardTransform);
         _touchpadService.MultiTouchPreview += (p1x, p1y, p2x, p2y) => DispatcherQueue.TryEnqueue(() => OnMultiTouchPreview(p1x, p1y, p2x, p2y));

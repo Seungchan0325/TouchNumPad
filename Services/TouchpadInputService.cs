@@ -104,7 +104,6 @@ public sealed class TouchpadInputService : IDisposable
     public event Action<double, double, double, double>? MultiTouchPreview; // p1RawX, p1RawY, p2RawX, p2RawY
     public event Action? MultiTouchEnded;
     public event Action? EscapeKeyPressed;
-    public Func<bool>? IsNumpadVisibleCheck;
 
     public TouchpadInputService(AppSettings settings, FeedbackService feedbackService)
     {
@@ -182,9 +181,8 @@ public sealed class TouchpadInputService : IDisposable
             long now = Environment.TickCount64;
             var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
 
-            // While numpad is active or visible, pressing ESC closes the numpad window & returns to mouse mode
-            bool isNumpadActiveOrVisible = IsNumpadActive || (IsNumpadVisibleCheck?.Invoke() == true);
-            if (isNumpadActiveOrVisible && kb.vkCode == 0x1B) // VK_ESCAPE
+            // Only when Numpad Mode is actively controlling the touchpad (has focus), pressing ESC exits numpad & closes window
+            if (IsNumpadActive && kb.vkCode == 0x1B) // VK_ESCAPE
             {
                 int msg = wParam.ToInt32();
                 if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
