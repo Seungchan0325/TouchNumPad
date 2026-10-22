@@ -19,6 +19,13 @@
           DoubleTapped="RootGrid_DoubleTapped"
           SizeChanged="RootGrid_SizeChanged">
 
+        <Grid.RenderTransform>
+            <TransformGroup>
+                <ScaleTransform x:Name="WindowScaleTransform" />
+                <TranslateTransform x:Name="WindowTranslateTransform" />
+            </TransformGroup>
+        </Grid.RenderTransform>
+
         <!-- Numpad Board: Rotates, Scales, and Translates like a photo in real-time -->
         <Grid x:Name="NumpadBoard"
               HorizontalAlignment="Stretch"

@@ -36,6 +36,10 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, Border> _keyBorders = new();
     private readonly DispatcherTimer _indicatorHideTimer;
     private readonly DispatcherTimer _multiTouchHideTimer;
+    private readonly DispatcherTimer _entranceAnimationTimer;
+
+    private const int EntranceAnimationDurationMs = 190;
+    private long _entranceAnimStartTick;
 
     private bool _isNumpadVisible;
     private bool _isNumpadMode;
@@ -74,6 +78,12 @@ public sealed partial class MainWindow : Window
             _multiTouchHideTimer.Stop();
             MultiTouchCanvas.Opacity = 0.0;
         };
+
+        _entranceAnimationTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(14)
+        };
+        _entranceAnimationTimer.Tick += OnEntranceAnimationTick;
 
         InitializeComponent();
         BuildNumpadKeysUI();
@@ -178,6 +188,11 @@ public sealed partial class MainWindow : Window
     private void RootGrid_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         ApplyNumpadBoardTransform();
+        if (e.NewSize.Width > 0 && e.NewSize.Height > 0)
+        {
+            WindowScaleTransform.CenterX = e.NewSize.Width / 2.0;
+            WindowScaleTransform.CenterY = e.NewSize.Height / 2.0;
+        }
     }
 
     /// <summary>
@@ -796,8 +811,21 @@ public sealed partial class MainWindow : Window
         if (_hwnd == IntPtr.Zero)
             return;
 
+        _entranceAnimationTimer.Stop();
         TryPositionNearActiveInput();
         _isNumpadVisible = true;
+
+        // Reset to initial animation state (hidden, slightly scaled down, translated down)
+        SetWindowAlphaDirect(0);
+        RootGrid.Opacity = 0.0;
+
+        double width = RootGrid.ActualWidth > 0 ? RootGrid.ActualWidth : BaseWindowWidthDip;
+        double height = RootGrid.ActualHeight > 0 ? RootGrid.ActualHeight : (BaseWindowWidthDip / 1.6);
+        WindowScaleTransform.CenterX = width / 2.0;
+        WindowScaleTransform.CenterY = height / 2.0;
+        WindowScaleTransform.ScaleX = 0.93;
+        WindowScaleTransform.ScaleY = 0.93;
+        WindowTranslateTransform.Y = 10.0;
 
         NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_SHOWNOACTIVATE);
         NativeMethods.SetWindowPos(
@@ -809,9 +837,50 @@ public sealed partial class MainWindow : Window
             0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
 
+        _entranceAnimStartTick = Environment.TickCount64;
+        _entranceAnimationTimer.Start();
+
         if (_settingsWindow is null || !_settingsWindow.IsRecordingHotkey)
         {
             EnterNumpadMode();
+        }
+    }
+
+    private void OnEntranceAnimationTick(object? sender, object e)
+    {
+        long elapsed = Environment.TickCount64 - _entranceAnimStartTick;
+        double progress = Math.Clamp((double)elapsed / EntranceAnimationDurationMs, 0.0, 1.0);
+
+        // Quartic Ease-Out curve for fluid, snappy deceleration
+        double ease = 1.0 - Math.Pow(1.0 - progress, 4);
+
+        double targetOpacity = _settings.WindowOpacity;
+        byte maxAlpha = (byte)Math.Clamp((int)Math.Round(targetOpacity * 255), 64, 255);
+        byte currentAlpha = (byte)Math.Clamp((int)Math.Round(maxAlpha * ease), 0, 255);
+
+        SetWindowAlphaDirect(currentAlpha);
+
+        RootGrid.Opacity = ease;
+        WindowScaleTransform.ScaleX = 0.93 + 0.07 * ease;
+        WindowScaleTransform.ScaleY = 0.93 + 0.07 * ease;
+        WindowTranslateTransform.Y = 10.0 * (1.0 - ease);
+
+        if (progress >= 1.0)
+        {
+            _entranceAnimationTimer.Stop();
+            WindowScaleTransform.ScaleX = 1.0;
+            WindowScaleTransform.ScaleY = 1.0;
+            WindowTranslateTransform.Y = 0.0;
+            RootGrid.Opacity = 1.0;
+            ApplyOpacity(_settings.WindowOpacity);
+        }
+    }
+
+    private void SetWindowAlphaDirect(byte alpha)
+    {
+        if (_hwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetLayeredWindowAttributes(_hwnd, 0, alpha, NativeMethods.LWA_ALPHA);
         }
     }
 
@@ -903,6 +972,7 @@ public sealed partial class MainWindow : Window
         if (_hwnd == IntPtr.Zero)
             return;
 
+        _entranceAnimationTimer.Stop();
         _isNumpadVisible = false;
         _isNumpadMode = false;
         _touchpadService.IsNumpadActive = false;
