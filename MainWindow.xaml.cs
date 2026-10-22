@@ -800,10 +800,13 @@ public sealed partial class MainWindow : Window
 
             int cursorX = winPos.X + (int)Math.Round(Math.Clamp(edgeRawX.Value, 0.0, 1.0) * winSize.Width);
             int cursorY = winPos.Y + (int)Math.Round(Math.Clamp(edgeRawY.Value, 0.0, 1.0) * winSize.Height);
+            CursorVisibilityService.ShowCursor(restorePosition: false);
             NativeMethods.SetCursorPos(cursorX, cursorY);
         }
-
-        CursorVisibilityService.ShowCursor();
+        else
+        {
+            CursorVisibilityService.ShowCursor(restorePosition: true);
+        }
     }
 
     public void ShowNumpadWindow()

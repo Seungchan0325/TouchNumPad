@@ -176,30 +176,37 @@ public sealed class TouchpadInputService : IDisposable
 
     private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0)
+        try
         {
-            long now = Environment.TickCount64;
-            var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
-
-            // Only when Numpad Mode is actively controlling the touchpad (has focus), pressing ESC exits numpad & closes window
-            if (IsNumpadActive && kb.vkCode == 0x1B) // VK_ESCAPE
+            if (nCode >= 0)
             {
-                int msg = wParam.ToInt32();
-                if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
-                {
-                    EscapeKeyPressed?.Invoke();
-                }
-                return new IntPtr(1);
-            }
+                long now = Environment.TickCount64;
+                var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
 
-            // While in two-finger gesture or right after it, suppress system synthetic Ctrl key (zoom modifier)
-            if (IsNumpadActive && (_isTwoFingerGestureActive || now <= _suppressWheelUntilTick))
-            {
-                if (kb.vkCode is 0x11 or 0xA2 or 0xA3) // VK_CONTROL, VK_LCONTROL, VK_RCONTROL
+                // Only when Numpad Mode is actively controlling the touchpad (has focus), pressing ESC exits numpad & closes window
+                if (IsNumpadActive && kb.vkCode == 0x1B) // VK_ESCAPE
                 {
+                    int msg = wParam.ToInt32();
+                    if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
+                    {
+                        EscapeKeyPressed?.Invoke();
+                    }
                     return new IntPtr(1);
                 }
+
+                // While in two-finger gesture or right after it, suppress system synthetic Ctrl key (zoom modifier)
+                if (IsNumpadActive && (_isTwoFingerGestureActive || now <= _suppressWheelUntilTick))
+                {
+                    if (kb.vkCode is 0x11 or 0xA2 or 0xA3) // VK_CONTROL, VK_LCONTROL, VK_RCONTROL
+                    {
+                        return new IntPtr(1);
+                    }
+                }
             }
+        }
+        catch
+        {
+            // Defensive: Never allow exceptions to escape to OS hook dispatcher
         }
 
         return NativeMethods.CallNextHookEx(_keyboardHookHandle, nCode, wParam, lParam);
@@ -207,40 +214,47 @@ public sealed class TouchpadInputService : IDisposable
 
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0)
+        try
         {
-            uint msg = (uint)wParam;
-            long now = Environment.TickCount64;
+            if (nCode >= 0)
+            {
+                uint msg = (uint)wParam;
+                long now = Environment.TickCount64;
 
-            // While in Numpad Mode, suppress ALL mouse movements, button clicks, and scroll/zoom wheels
-            if (IsNumpadActive)
-            {
-                if (msg is NativeMethods.WM_MOUSEMOVE
-                    or NativeMethods.WM_LBUTTONDOWN
-                    or NativeMethods.WM_LBUTTONUP
-                    or NativeMethods.WM_LBUTTONDBLCLK
-                    or NativeMethods.WM_RBUTTONDOWN
-                    or NativeMethods.WM_RBUTTONUP
-                    or NativeMethods.WM_RBUTTONDBLCLK
-                    or NativeMethods.WM_MBUTTONDOWN
-                    or NativeMethods.WM_MBUTTONUP
-                    or NativeMethods.WM_MBUTTONDBLCLK
-                    or NativeMethods.WM_MOUSEWHEEL
-                    or NativeMethods.WM_MOUSEHWHEEL)
+                // While in Numpad Mode, suppress ALL mouse movements, button clicks, and scroll/zoom wheels
+                if (IsNumpadActive)
                 {
-                    return new IntPtr(1);
+                    if (msg is NativeMethods.WM_MOUSEMOVE
+                        or NativeMethods.WM_LBUTTONDOWN
+                        or NativeMethods.WM_LBUTTONUP
+                        or NativeMethods.WM_LBUTTONDBLCLK
+                        or NativeMethods.WM_RBUTTONDOWN
+                        or NativeMethods.WM_RBUTTONUP
+                        or NativeMethods.WM_RBUTTONDBLCLK
+                        or NativeMethods.WM_MBUTTONDOWN
+                        or NativeMethods.WM_MBUTTONUP
+                        or NativeMethods.WM_MBUTTONDBLCLK
+                        or NativeMethods.WM_MOUSEWHEEL
+                        or NativeMethods.WM_MOUSEHWHEEL)
+                    {
+                        return new IntPtr(1);
+                    }
+                }
+                else if (now <= _suppressClickUntilTick || now <= _suppressWheelUntilTick)
+                {
+                    if (msg is NativeMethods.WM_LBUTTONDOWN 
+                        or NativeMethods.WM_LBUTTONUP
+                        or NativeMethods.WM_MOUSEWHEEL
+                        or NativeMethods.WM_MOUSEHWHEEL)
+                    {
+                        return new IntPtr(1);
+                    }
                 }
             }
-            else if (now <= _suppressClickUntilTick || now <= _suppressWheelUntilTick)
-            {
-                if (msg is NativeMethods.WM_LBUTTONDOWN 
-                    or NativeMethods.WM_LBUTTONUP
-                    or NativeMethods.WM_MOUSEWHEEL
-                    or NativeMethods.WM_MOUSEHWHEEL)
-                {
-                    return new IntPtr(1);
-                }
-            }
+        }
+        catch
+        {
+            // Defensive: Never allow exceptions to escape to OS hook dispatcher
         }
 
         return NativeMethods.CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);

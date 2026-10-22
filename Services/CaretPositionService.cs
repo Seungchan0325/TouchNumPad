@@ -24,14 +24,21 @@ internal static unsafe class CaretPositionService
         isExactCaret = false;
 
         IntPtr fgHwnd = NativeMethods.GetForegroundWindow();
-        if (fgHwnd == IntPtr.Zero || fgHwnd == ownHwnd)
+        if (fgHwnd == IntPtr.Zero || fgHwnd == ownHwnd || NativeMethods.IsHungAppWindow(fgHwnd))
             return false;
 
         // 1. Fast path: Win32 GetGUIThreadInfo caret
-        if (TryGetGuiThreadCaretRect(fgHwnd, out targetRect))
+        try
         {
-            isExactCaret = true;
-            return true;
+            if (TryGetGuiThreadCaretRect(fgHwnd, out targetRect))
+            {
+                isExactCaret = true;
+                return true;
+            }
+        }
+        catch
+        {
+            // Ignore
         }
 
         // 2. Modern apps path (WinUI, WPF, Chrome, Edge, VS Code, Electron, Office):
@@ -44,11 +51,18 @@ internal static unsafe class CaretPositionService
         {
             var task = Task.Run(() =>
             {
-                if (TryGetUiaCaretOrInputRect(fgHwnd, out var rect, out bool exact))
+                try
                 {
-                    uiaRect = rect;
-                    uiaExact = exact;
-                    uiaFound = true;
+                    if (TryGetUiaCaretOrInputRect(fgHwnd, out var rect, out bool exact))
+                    {
+                        uiaRect = rect;
+                        uiaExact = exact;
+                        uiaFound = true;
+                    }
+                }
+                catch
+                {
+                    // Ignore COM / thread pool errors
                 }
             });
 
@@ -134,6 +148,7 @@ internal static unsafe class CaretPositionService
         screenRect = default;
         isExactCaret = false;
 
+        int coInitHr = NativeMethods.CoInitializeEx(IntPtr.Zero, NativeMethods.COINIT_MULTITHREADED);
         IntPtr pAutomation = IntPtr.Zero;
         IntPtr pFocused = IntPtr.Zero;
 
@@ -150,36 +165,48 @@ internal static unsafe class CaretPositionService
                 return false;
 
             // IUIAutomation::GetFocusedElement is vtable slot 8
-            var getFocusedElement = (delegate* unmanaged[Stdcall]<IntPtr, out IntPtr, int>)GetVtableMethod(pAutomation, 8);
+            IntPtr pGetFocusedElement = GetVtableMethod(pAutomation, 8);
+            if (pGetFocusedElement == IntPtr.Zero)
+                return false;
+
+            var getFocusedElement = (delegate* unmanaged[Stdcall]<IntPtr, out IntPtr, int>)pGetFocusedElement;
             hr = getFocusedElement(pAutomation, out pFocused);
             if (hr < 0 || pFocused == IntPtr.Zero)
                 return false;
 
             // Check if element is offscreen (slot 38: get_CurrentIsOffscreen)
-            var getIsOffscreen = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)GetVtableMethod(pFocused, 38);
-            if (getIsOffscreen(pFocused, out int isOffscreen) >= 0 && isOffscreen != 0)
-                return false;
+            IntPtr pGetIsOffscreen = GetVtableMethod(pFocused, 38);
+            if (pGetIsOffscreen != IntPtr.Zero)
+            {
+                var getIsOffscreen = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)pGetIsOffscreen;
+                if (getIsOffscreen(pFocused, out int isOffscreen) >= 0 && isOffscreen != 0)
+                    return false;
+            }
 
             // 1. Try IUIAutomationTextPattern2 (UIA_TextPattern2Id = 10024) -> GetCaretRange (slot 10)
             if (TryGetPattern(pFocused, UIA_TextPattern2Id, out IntPtr pTextPattern2))
             {
                 try
                 {
-                    var getCaretRange = (delegate* unmanaged[Stdcall]<IntPtr, out int, out IntPtr, int>)GetVtableMethod(pTextPattern2, 10);
-                    if (getCaretRange(pTextPattern2, out int isActive, out IntPtr pCaretRange) >= 0 && pCaretRange != IntPtr.Zero)
+                    IntPtr pGetCaretRange = GetVtableMethod(pTextPattern2, 10);
+                    if (pGetCaretRange != IntPtr.Zero)
                     {
-                        try
+                        var getCaretRange = (delegate* unmanaged[Stdcall]<IntPtr, out int, out IntPtr, int>)pGetCaretRange;
+                        if (getCaretRange(pTextPattern2, out int isActive, out IntPtr pCaretRange) >= 0 && pCaretRange != IntPtr.Zero)
                         {
-                            if (TryGetRangeRect(pCaretRange, out screenRect) &&
-                                IsRectReasonableForWindow(fgHwnd, screenRect))
+                            try
                             {
-                                isExactCaret = true;
-                                return true;
+                                if (TryGetRangeRect(pCaretRange, out screenRect) &&
+                                    IsRectReasonableForWindow(fgHwnd, screenRect))
+                                {
+                                    isExactCaret = true;
+                                    return true;
+                                }
                             }
-                        }
-                        finally
-                        {
-                            ReleaseComObject(pCaretRange);
+                            finally
+                            {
+                                ReleaseComObject(pCaretRange);
+                            }
                         }
                     }
                 }
@@ -196,36 +223,45 @@ internal static unsafe class CaretPositionService
                 hasTextPattern = true;
                 try
                 {
-                    var getSelection = (delegate* unmanaged[Stdcall]<IntPtr, out IntPtr, int>)GetVtableMethod(pTextPattern, 5);
-                    if (getSelection(pTextPattern, out IntPtr pRangeArray) >= 0 && pRangeArray != IntPtr.Zero)
+                    IntPtr pGetSelection = GetVtableMethod(pTextPattern, 5);
+                    if (pGetSelection != IntPtr.Zero)
                     {
-                        try
+                        var getSelection = (delegate* unmanaged[Stdcall]<IntPtr, out IntPtr, int>)pGetSelection;
+                        if (getSelection(pTextPattern, out IntPtr pRangeArray) >= 0 && pRangeArray != IntPtr.Zero)
                         {
-                            // IUIAutomationTextRangeArray::get_Length (slot 3), GetElement (slot 4)
-                            var getLength = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)GetVtableMethod(pRangeArray, 3);
-                            var getElement = (delegate* unmanaged[Stdcall]<IntPtr, int, out IntPtr, int>)GetVtableMethod(pRangeArray, 4);
-
-                            if (getLength(pRangeArray, out int length) >= 0 && length > 0 &&
-                                getElement(pRangeArray, 0, out IntPtr pRange) >= 0 && pRange != IntPtr.Zero)
+                            try
                             {
-                                try
+                                IntPtr pGetLength = GetVtableMethod(pRangeArray, 3);
+                                IntPtr pGetElement = GetVtableMethod(pRangeArray, 4);
+
+                                if (pGetLength != IntPtr.Zero && pGetElement != IntPtr.Zero)
                                 {
-                                    if (TryGetRangeRect(pRange, out screenRect) &&
-                                        IsRectReasonableForWindow(fgHwnd, screenRect))
+                                    var getLength = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)pGetLength;
+                                    var getElement = (delegate* unmanaged[Stdcall]<IntPtr, int, out IntPtr, int>)pGetElement;
+
+                                    if (getLength(pRangeArray, out int length) >= 0 && length > 0 &&
+                                        getElement(pRangeArray, 0, out IntPtr pRange) >= 0 && pRange != IntPtr.Zero)
                                     {
-                                        isExactCaret = true;
-                                        return true;
+                                        try
+                                        {
+                                            if (TryGetRangeRect(pRange, out screenRect) &&
+                                                IsRectReasonableForWindow(fgHwnd, screenRect))
+                                            {
+                                                isExactCaret = true;
+                                                return true;
+                                            }
+                                        }
+                                        finally
+                                        {
+                                            ReleaseComObject(pRange);
+                                        }
                                     }
                                 }
-                                finally
-                                {
-                                    ReleaseComObject(pRange);
-                                }
                             }
-                        }
-                        finally
-                        {
-                            ReleaseComObject(pRangeArray);
+                            finally
+                            {
+                                ReleaseComObject(pRangeArray);
+                            }
                         }
                     }
                 }
@@ -236,10 +272,13 @@ internal static unsafe class CaretPositionService
             }
 
             // 3. Fallback for empty/focused editable controls (e.g., empty browser <input>, empty TextBox, Excel cell):
-            // Check control type (slot 21: get_CurrentControlType) and ValuePattern read-only status
-            var getControlType = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)GetVtableMethod(pFocused, 21);
+            IntPtr pGetControlType = GetVtableMethod(pFocused, 21);
             int controlType = 0;
-            getControlType(pFocused, out controlType);
+            if (pGetControlType != IntPtr.Zero)
+            {
+                var getControlType = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)pGetControlType;
+                getControlType(pFocused, out controlType);
+            }
 
             bool isEditable = controlType == UIA_EditControlTypeId ||
                               (hasTextPattern && (controlType == UIA_DocumentControlTypeId || controlType == UIA_ComboBoxControlTypeId));
@@ -248,11 +287,14 @@ internal static unsafe class CaretPositionService
             {
                 try
                 {
-                    // IUIAutomationValuePattern::get_CurrentIsReadOnly (slot 5)
-                    var getIsReadOnly = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)GetVtableMethod(pValuePattern, 5);
-                    if (getIsReadOnly(pValuePattern, out int isReadOnly) >= 0 && isReadOnly == 0)
+                    IntPtr pGetIsReadOnly = GetVtableMethod(pValuePattern, 5);
+                    if (pGetIsReadOnly != IntPtr.Zero)
                     {
-                        isEditable = true;
+                        var getIsReadOnly = (delegate* unmanaged[Stdcall]<IntPtr, out int, int>)pGetIsReadOnly;
+                        if (getIsReadOnly(pValuePattern, out int isReadOnly) >= 0 && isReadOnly == 0)
+                        {
+                            isEditable = true;
+                        }
                     }
                 }
                 finally
@@ -263,36 +305,37 @@ internal static unsafe class CaretPositionService
 
             if (isEditable)
             {
-                // IUIAutomationElement::get_CurrentBoundingRectangle (slot 43)
-                var getBoundingRect = (delegate* unmanaged[Stdcall]<IntPtr, out NativeMethods.RECT, int>)GetVtableMethod(pFocused, 43);
-                if (getBoundingRect(pFocused, out var elemRect) >= 0 &&
-                    elemRect.Right > elemRect.Left &&
-                    elemRect.Bottom > elemRect.Top &&
-                    IsRectReasonableForWindow(fgHwnd, elemRect))
+                IntPtr pGetBoundingRect = GetVtableMethod(pFocused, 43);
+                if (pGetBoundingRect != IntPtr.Zero)
                 {
-                    int width = elemRect.Right - elemRect.Left;
-                    int height = elemRect.Bottom - elemRect.Top;
-
-                    // If the editable element is a large multi-line document/editor and had no caret rect,
-                    // anchor near its top-left typing area rather than below the entire window.
-                    if (width > 500 || height > 160)
+                    var getBoundingRect = (delegate* unmanaged[Stdcall]<IntPtr, out NativeMethods.RECT, int>)pGetBoundingRect;
+                    if (getBoundingRect(pFocused, out var elemRect) >= 0 &&
+                        elemRect.Right > elemRect.Left &&
+                        elemRect.Bottom > elemRect.Top &&
+                        IsRectReasonableForWindow(fgHwnd, elemRect))
                     {
-                        screenRect = new NativeMethods.RECT
+                        int width = elemRect.Right - elemRect.Left;
+                        int height = elemRect.Bottom - elemRect.Top;
+
+                        if (width > 500 || height > 160)
                         {
-                            Left = elemRect.Left + 24,
-                            Top = elemRect.Top + 24,
-                            Right = elemRect.Left + 40,
-                            Bottom = elemRect.Top + 48
-                        };
-                        isExactCaret = true;
-                    }
-                    else
-                    {
-                        screenRect = elemRect;
-                        isExactCaret = false;
-                    }
+                            screenRect = new NativeMethods.RECT
+                            {
+                                Left = elemRect.Left + 24,
+                                Top = elemRect.Top + 24,
+                                Right = elemRect.Left + 40,
+                                Bottom = elemRect.Top + 48
+                            };
+                            isExactCaret = true;
+                        }
+                        else
+                        {
+                            screenRect = elemRect;
+                            isExactCaret = false;
+                        }
 
-                    return true;
+                        return true;
+                    }
                 }
             }
         }
@@ -304,6 +347,11 @@ internal static unsafe class CaretPositionService
         {
             ReleaseComObject(pFocused);
             ReleaseComObject(pAutomation);
+
+            if (coInitHr >= 0)
+            {
+                NativeMethods.CoUninitialize();
+            }
         }
 
         return false;
@@ -312,8 +360,11 @@ internal static unsafe class CaretPositionService
     private static bool TryGetPattern(IntPtr pElement, int patternId, out IntPtr pPattern)
     {
         pPattern = IntPtr.Zero;
-        // IUIAutomationElement::GetCurrentPattern is slot 16
-        var getCurrentPattern = (delegate* unmanaged[Stdcall]<IntPtr, int, out IntPtr, int>)GetVtableMethod(pElement, 16);
+        IntPtr pGetMethod = GetVtableMethod(pElement, 16);
+        if (pGetMethod == IntPtr.Zero)
+            return false;
+
+        var getCurrentPattern = (delegate* unmanaged[Stdcall]<IntPtr, int, out IntPtr, int>)pGetMethod;
         int hr = getCurrentPattern(pElement, patternId, out pPattern);
         return hr >= 0 && pPattern != IntPtr.Zero;
     }
@@ -323,13 +374,15 @@ internal static unsafe class CaretPositionService
         if (TryExtractBoundingRectangles(pTextRange, out rect))
             return true;
 
-        // If degenerate 0-length caret range returned an empty SAFEARRAY, expand to Character (unit 0) and retry
-        // IUIAutomationTextRange::ExpandToEnclosingUnit is slot 6
-        var expand = (delegate* unmanaged[Stdcall]<IntPtr, int, int>)GetVtableMethod(pTextRange, 6);
-        if (expand(pTextRange, TextUnit_Character) >= 0)
+        IntPtr pExpand = GetVtableMethod(pTextRange, 6);
+        if (pExpand != IntPtr.Zero)
         {
-            if (TryExtractBoundingRectangles(pTextRange, out rect))
-                return true;
+            var expand = (delegate* unmanaged[Stdcall]<IntPtr, int, int>)pExpand;
+            if (expand(pTextRange, TextUnit_Character) >= 0)
+            {
+                if (TryExtractBoundingRectangles(pTextRange, out rect))
+                    return true;
+            }
         }
 
         return false;
@@ -339,8 +392,11 @@ internal static unsafe class CaretPositionService
     {
         rect = default;
 
-        // IUIAutomationTextRange::GetBoundingRectangles is slot 10
-        var getBoundingRectangles = (delegate* unmanaged[Stdcall]<IntPtr, out IntPtr, int>)GetVtableMethod(pTextRange, 10);
+        IntPtr pGetBoundingRectangles = GetVtableMethod(pTextRange, 10);
+        if (pGetBoundingRectangles == IntPtr.Zero)
+            return false;
+
+        var getBoundingRectangles = (delegate* unmanaged[Stdcall]<IntPtr, out IntPtr, int>)pGetBoundingRectangles;
         int hr = getBoundingRectangles(pTextRange, out IntPtr psa);
         if (hr < 0 || psa == IntPtr.Zero)
             return false;
@@ -401,7 +457,6 @@ internal static unsafe class CaretPositionService
         if (!NativeMethods.GetWindowRect(fgHwnd, out var winRect))
             return true;
 
-        // Allow some tolerance for popups/child windows
         const int tolerance = 64;
         return rect.Right >= winRect.Left - tolerance &&
                rect.Left <= winRect.Right + tolerance &&
@@ -411,16 +466,35 @@ internal static unsafe class CaretPositionService
 
     private static IntPtr GetVtableMethod(IntPtr comObject, int slot)
     {
-        IntPtr vtable = *(IntPtr*)comObject;
-        return *((IntPtr*)vtable + slot);
+        if (comObject == IntPtr.Zero)
+            return IntPtr.Zero;
+
+        try
+        {
+            IntPtr vtable = *(IntPtr*)comObject;
+            if (vtable == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            return *((IntPtr*)vtable + slot);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
     }
 
     private static void ReleaseComObject(IntPtr comObject)
     {
         if (comObject != IntPtr.Zero)
         {
-            var release = (delegate* unmanaged[Stdcall]<IntPtr, uint>)GetVtableMethod(comObject, 2);
-            release(comObject);
+            try
+            {
+                Marshal.Release(comObject);
+            }
+            catch
+            {
+                // Ignore
+            }
         }
     }
 }

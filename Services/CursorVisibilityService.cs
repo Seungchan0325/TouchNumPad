@@ -2,37 +2,32 @@ using TouchNumPad.Interop;
 
 namespace TouchNumPad.Services;
 
+/// <summary>
+/// Manages cursor presentation during Numpad mode safely.
+/// Never mutates Windows OS global cursor bitmaps (SetSystemCursor) to avoid leaving
+/// permanent invisible cursor corruption (e.g., missing I-beam in input fields) on crash.
+/// </summary>
 internal static class CursorVisibilityService
 {
-    private static readonly uint[] SystemCursorIds =
-    [
-        32512, // IDC_ARROW
-        32513, // IDC_IBEAM
-        32514, // IDC_WAIT
-        32515, // IDC_CROSS
-        32516, // IDC_UPARROW
-        32642, // IDC_SIZENWSE
-        32643, // IDC_SIZENESW
-        32644, // IDC_SIZEWE
-        32645, // IDC_SIZENS
-        32646, // IDC_SIZEALL
-        32648, // IDC_NO
-        32649, // IDC_HAND
-        32650, // IDC_APPSTARTING
-        32651  // IDC_HELP
-    ];
-
     private static readonly object SyncLock = new();
     private static bool _isHidden;
+    private static NativeMethods.POINT? _savedPoint;
 
     static CursorVisibilityService()
     {
+        // On module load, immediately heal any previously corrupted system cursors left by older builds
+        RestoreSystemCursors();
+
         AppDomain.CurrentDomain.ProcessExit += (_, _) => RestoreSystemCursors();
         AppDomain.CurrentDomain.UnhandledException += (_, _) => RestoreSystemCursors();
     }
 
     public static bool IsHidden => _isHidden;
 
+    /// <summary>
+    /// Parks the cursor at the screen edge during numpad mode so it doesn't obstruct active input fields.
+    /// Does not alter global OS cursor assets.
+    /// </summary>
     public static void HideCursor()
     {
         lock (SyncLock)
@@ -40,49 +35,57 @@ internal static class CursorVisibilityService
             if (_isHidden)
                 return;
 
-            // 32x32 monochrome cursor: AND mask = all 1s (transparent), XOR mask = all 0s
-            byte[] andMask = new byte[128];
-            byte[] xorMask = new byte[128];
-            Array.Fill(andMask, (byte)0xFF);
-
-            IntPtr hBlank = NativeMethods.CreateCursor(IntPtr.Zero, 0, 0, 32, 32, andMask, xorMask);
-            if (hBlank == IntPtr.Zero)
-                return;
-
-            try
+            if (NativeMethods.GetCursorPos(out var pt))
             {
-                foreach (uint id in SystemCursorIds)
-                {
-                    IntPtr hCopy = NativeMethods.CopyIcon(hBlank);
-                    if (hCopy != IntPtr.Zero)
-                    {
-                        NativeMethods.SetSystemCursor(hCopy, id);
-                    }
-                }
+                _savedPoint = pt;
+            }
 
-                _isHidden = true;
-            }
-            finally
+            // Move cursor to bottom-right corner of virtual screen so it does not obstruct text / input carets
+            int maxX = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXVIRTUALSCREEN);
+            int maxY = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYVIRTUALSCREEN);
+            if (maxX > 0 && maxY > 0)
             {
-                NativeMethods.DestroyCursor(hBlank);
+                NativeMethods.SetCursorPos(maxX - 1, maxY - 1);
             }
+
+            _isHidden = true;
         }
     }
 
-    public static void ShowCursor()
+    /// <summary>
+    /// Restores cursor state when exiting numpad mode.
+    /// If restorePosition is true, moves cursor back to where it was before entering numpad mode.
+    /// </summary>
+    public static void ShowCursor(bool restorePosition = true)
     {
         lock (SyncLock)
         {
             if (!_isHidden)
                 return;
 
-            RestoreSystemCursors();
+            if (restorePosition && _savedPoint.HasValue)
+            {
+                NativeMethods.SetCursorPos(_savedPoint.Value.X, _savedPoint.Value.Y);
+            }
+
+            _savedPoint = null;
             _isHidden = false;
         }
     }
 
-    private static void RestoreSystemCursors()
+    /// <summary>
+    /// Invokes Windows SystemParametersInfo(SPI_SETCURSORS) to reset all OS-level system cursors
+    /// back to Windows default schemes.
+    /// </summary>
+    public static void RestoreSystemCursors()
     {
-        NativeMethods.SystemParametersInfo(NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+        try
+        {
+            NativeMethods.SystemParametersInfo(NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+        }
+        catch
+        {
+            // Ignore
+        }
     }
 }
