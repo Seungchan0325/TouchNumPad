@@ -60,13 +60,22 @@ public sealed class TouchpadInputService : IDisposable
     private double _maxDistance;
     private long _startTimeTick;
 
-    // Two-finger transform gesture state
+    // Two-finger transform gesture state (Anchor-based + 1€ Filter + Pivot around fingers)
     private bool _isTwoFingerGestureActive;
-    private double _prevTwoFingerDist;
-    private double _prevTwoFingerAngleRad;
-    private double _prevTwoFingerCenterX;
-    private double _prevTwoFingerCenterY;
-    private bool _transformChangedInSession;
+    private int _twoFingerStabilizeFrames;
+    private double _anchorDist;
+    private double _anchorAngleRad;
+    private double _anchorMidX;
+    private double _anchorMidY;
+    private double _anchorScale;
+    private double _anchorAngleDeg;
+    private double _anchorNumpadCx;
+    private double _anchorNumpadCy;
+
+    private readonly OneEuroFilter _filterScale = new(minCutoff: 1.0, beta: 0.08);
+    private readonly OneEuroFilter _filterAngle = new(minCutoff: 1.2, beta: 0.08);
+    private readonly OneEuroFilter _filterCenterX = new(minCutoff: 1.0, beta: 0.08);
+    private readonly OneEuroFilter _filterCenterY = new(minCutoff: 1.0, beta: 0.08);
 
     // Outside double-tap tracking
     private long _lastOutsideTapTick;
@@ -605,81 +614,128 @@ public sealed class TouchpadInputService : IDisposable
             double dist = Math.Sqrt(dx * dx + dy * dy);
             double angleRad = Math.Atan2(dy, dx);
 
+            // Phase 1: Contact stabilization (wait 2 frames to avoid initial tap spikes)
             if (!_isTwoFingerGestureActive)
             {
                 _isTwoFingerGestureActive = true;
-                _prevTwoFingerDist = dist;
-                _prevTwoFingerAngleRad = angleRad;
-                _prevTwoFingerCenterX = midX;
-                _prevTwoFingerCenterY = midY;
-                _transformChangedInSession = false;
+                _twoFingerStabilizeFrames = 0;
+                _anchorDist = dist;
+                _anchorAngleRad = angleRad;
+                _anchorMidX = midX;
+                _anchorMidY = midY;
+                _anchorScale = _settings.NumpadScale;
+                _anchorAngleDeg = _settings.NumpadAngle;
+                _anchorNumpadCx = _settings.NumpadCenterX;
+                _anchorNumpadCy = _settings.NumpadCenterY;
+
+                _filterScale.Reset();
+                _filterAngle.Reset();
+                _filterCenterX.Reset();
+                _filterCenterY.Reset();
+
                 TouchPreviewCancelled?.Invoke();
-            }
-            else
-            {
-                // Scale (pinch)
-                if (_prevTwoFingerDist > 0.02 && dist > 0.02)
-                {
-                    double scaleRatio = dist / _prevTwoFingerDist;
-                    double newScale = Math.Clamp(_settings.NumpadScale * scaleRatio, 0.40, 1.0);
-                    if (Math.Abs(newScale - _settings.NumpadScale) > 0.002)
-                    {
-                        _settings.NumpadScale = newScale;
-                        _transformChangedInSession = true;
-                    }
-                }
-
-                // Rotation angle
-                double angleDeltaRad = angleRad - _prevTwoFingerAngleRad;
-                // Normalize wrap-around (-PI .. PI)
-                while (angleDeltaRad > Math.PI) angleDeltaRad -= 2.0 * Math.PI;
-                while (angleDeltaRad < -Math.PI) angleDeltaRad += 2.0 * Math.PI;
-
-                double angleDeltaDeg = angleDeltaRad * (180.0 / Math.PI);
-                double newAngle = Math.Clamp(_settings.NumpadAngle + angleDeltaDeg, -45.0, 45.0);
-                if (Math.Abs(newAngle - _settings.NumpadAngle) > 0.15)
-                {
-                    _settings.NumpadAngle = newAngle;
-                    _transformChangedInSession = true;
-                }
-
-                // Center position offset (two-finger pan/drag)
-                double deltaCx = midX - _prevTwoFingerCenterX;
-                double deltaCy = midY - _prevTwoFingerCenterY;
-                if (Math.Abs(deltaCx) > 0.001 || Math.Abs(deltaCy) > 0.001)
-                {
-                    _settings.NumpadCenterX = Math.Clamp(_settings.NumpadCenterX + deltaCx, 0.15, 0.85);
-                    _settings.NumpadCenterY = Math.Clamp(_settings.NumpadCenterY + deltaCy, 0.15, 0.85);
-                    _transformChangedInSession = true;
-                }
-
-                _prevTwoFingerDist = dist;
-                _prevTwoFingerAngleRad = angleRad;
-                _prevTwoFingerCenterX = midX;
-                _prevTwoFingerCenterY = midY;
-
                 MultiTouchPreview?.Invoke(p1.NormalizedX, p1.NormalizedY, p2.NormalizedX, p2.NormalizedY);
-
-                if (_transformChangedInSession)
-                {
-                    TransformUpdated?.Invoke();
-                }
+                return;
             }
 
+            if (_twoFingerStabilizeFrames < 2)
+            {
+                _twoFingerStabilizeFrames++;
+                _anchorDist = dist;
+                _anchorAngleRad = angleRad;
+                _anchorMidX = midX;
+                _anchorMidY = midY;
+                MultiTouchPreview?.Invoke(p1.NormalizedX, p1.NormalizedY, p2.NormalizedX, p2.NormalizedY);
+                return;
+            }
+
+            // Phase 2: Stable gesture transformation
+            if (_anchorDist > 0.01 && dist > 0.01)
+            {
+                // 1. Scale Calculation with Deadband Thresholding
+                double rawScaleRatio = dist / _anchorDist;
+                // Deadband: If within +/-4%, don't scale (prevents accidental zoom during pan)
+                double effectiveScaleRatio;
+                if (Math.Abs(rawScaleRatio - 1.0) < 0.04)
+                {
+                    effectiveScaleRatio = 1.0;
+                }
+                else
+                {
+                    effectiveScaleRatio = rawScaleRatio > 1.0 
+                        ? (rawScaleRatio - 0.04) / 0.96 
+                        : (rawScaleRatio + 0.04) / 1.04;
+                }
+                double targetScale = Math.Clamp(_anchorScale * effectiveScaleRatio, 0.40, 1.0);
+                double smoothedScale = _filterScale.Filter(targetScale, now);
+
+                // 2. Rotation Angle with Deadband & Magnetic Soft Snap to 0 degrees
+                double angleDeltaRad = angleRad - _anchorAngleRad;
+                while (angleDeltaRad > Math.PI) angleDeltaRad -= 2.0 * Math.PI;
+                while (angleDeltaRad < -Math.PI) angleDeltaRad -= 2.0 * Math.PI;
+                double angleDeltaDeg = angleDeltaRad * (180.0 / Math.PI);
+
+                // Deadband: If within +/-2.5 degrees of anchor, don't rotate (prevents wobble during pinch)
+                double effectiveAngleDeltaDeg = Math.Abs(angleDeltaDeg) < 2.5 
+                    ? 0.0 
+                    : (angleDeltaDeg > 0 ? angleDeltaDeg - 2.5 : angleDeltaDeg + 2.5);
+
+                double targetAngle = Math.Clamp(_anchorAngleDeg + effectiveAngleDeltaDeg, -45.0, 45.0);
+
+                // Magnetic snap to 0.0 degrees
+                if (Math.Abs(targetAngle) <= 2.2)
+                {
+                    targetAngle = 0.0;
+                }
+
+                double smoothedAngle = _filterAngle.Filter(targetAngle, now);
+
+                // 3. Under-the-finger Pivot Tracking:
+                // Keep the exact point under the fingers stationary as the numpad rotates and scales!
+                double dAngleRad = (smoothedAngle - _anchorAngleDeg) * (Math.PI / 180.0);
+                double scaleFactor = smoothedScale / Math.Max(0.1, _anchorScale);
+
+                // Vector from anchor fingers midpoint to anchor numpad center (aspect-ratio corrected)
+                double v0x = (_anchorNumpadCx - _anchorMidX) * ar;
+                double v0y = (_anchorNumpadCy - _anchorMidY);
+
+                // Rotate and scale the vector around the fingers midpoint
+                double cos = Math.Cos(dAngleRad);
+                double sin = Math.Sin(dAngleRad);
+                double rx = (v0x * cos - v0y * sin) * scaleFactor;
+                double ry = (v0x * sin + v0y * cos) * scaleFactor;
+
+                // New numpad center = current fingers midpoint + rotated/scaled vector
+                double targetCx = midX + (rx / ar);
+                double targetCy = midY + ry;
+
+                targetCx = Math.Clamp(targetCx, 0.15, 0.85);
+                targetCy = Math.Clamp(targetCy, 0.15, 0.85);
+
+                double smoothedCx = _filterCenterX.Filter(targetCx, now);
+                double smoothedCy = _filterCenterY.Filter(targetCy, now);
+
+                // Apply smoothed values to settings
+                _settings.NumpadScale = smoothedScale;
+                _settings.NumpadAngle = smoothedAngle;
+                _settings.NumpadCenterX = smoothedCx;
+                _settings.NumpadCenterY = smoothedCy;
+
+                TransformUpdated?.Invoke();
+            }
+
+            MultiTouchPreview?.Invoke(p1.NormalizedX, p1.NormalizedY, p2.NormalizedX, p2.NormalizedY);
             return;
         }
 
-        // Lifted two-finger gesture
+        // Lifted two-finger gesture -> Freeze immediately and save!
         if (_isTwoFingerGestureActive && activeCount < 2)
         {
             _isTwoFingerGestureActive = false;
-            _suppressWheelUntilTick = Environment.TickCount64 + 350; // Suppress lingering inertia scroll events!
+            _twoFingerStabilizeFrames = 0;
+            _suppressWheelUntilTick = Environment.TickCount64 + 350; // Suppress lingering inertia scroll
             MultiTouchEnded?.Invoke();
-            if (_transformChangedInSession)
-            {
-                _settings.Save();
-                _transformChangedInSession = false;
-            }
+            _settings.Save();
         }
 
         // -------------------------------------------------------------
