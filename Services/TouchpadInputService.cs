@@ -103,6 +103,8 @@ public sealed class TouchpadInputService : IDisposable
     public event Action? TransformUpdated;
     public event Action<double, double, double, double>? MultiTouchPreview; // p1RawX, p1RawY, p2RawX, p2RawY
     public event Action? MultiTouchEnded;
+    public event Action? EscapeKeyPressed;
+    public Func<bool>? IsNumpadVisibleCheck;
 
     public TouchpadInputService(AppSettings settings, FeedbackService feedbackService)
     {
@@ -178,11 +180,23 @@ public sealed class TouchpadInputService : IDisposable
         if (nCode >= 0)
         {
             long now = Environment.TickCount64;
+            var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
+
+            // While numpad is active or visible, pressing ESC closes the numpad window & returns to mouse mode
+            bool isNumpadActiveOrVisible = IsNumpadActive || (IsNumpadVisibleCheck?.Invoke() == true);
+            if (isNumpadActiveOrVisible && kb.vkCode == 0x1B) // VK_ESCAPE
+            {
+                int msg = wParam.ToInt32();
+                if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
+                {
+                    EscapeKeyPressed?.Invoke();
+                }
+                return new IntPtr(1);
+            }
 
             // While in two-finger gesture or right after it, suppress system synthetic Ctrl key (zoom modifier)
             if (IsNumpadActive && (_isTwoFingerGestureActive || now <= _suppressWheelUntilTick))
             {
-                var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
                 if (kb.vkCode is 0x11 or 0xA2 or 0xA3) // VK_CONTROL, VK_LCONTROL, VK_RCONTROL
                 {
                     return new IntPtr(1);
