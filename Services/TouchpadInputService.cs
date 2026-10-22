@@ -23,9 +23,7 @@ public sealed class TouchpadInputService : IDisposable
     private const double RightEdgeStartMinX = 0.70;
     private const double SwipeMinSpanX = 0.45;
 
-    // Tap vs slide-aim vs edge-exit thresholds
-    private const double TapMaxMovement = 0.085;
-    private const long MaxTapDurationMs = 1500;
+    // Edge-exit & watchdog thresholds
     private const double EdgeExitMinDragDistance = 0.25;
     private const double EdgeBoundaryMargin = 0.035;
     private const int LiftWatchdogTimeoutMs = 70;
@@ -49,7 +47,6 @@ public sealed class TouchpadInputService : IDisposable
     private volatile bool _inTouchSession;
     private volatile bool _swipeTriggeredThisSession;
     private volatile bool _edgeExitedThisSession;
-    private volatile bool _physicalClickSentThisSession;
     private volatile bool _physicalButtonWasDown;
     private bool _startedAtTopLeft;
     private bool _startedAtTopRight;
@@ -618,6 +615,7 @@ public sealed class TouchpadInputService : IDisposable
             if (!_isTwoFingerGestureActive)
             {
                 _isTwoFingerGestureActive = true;
+                _inTouchSession = false;
                 _twoFingerStabilizeFrames = 0;
                 _anchorDist = dist;
                 _anchorAngleRad = angleRad;
@@ -752,7 +750,6 @@ public sealed class TouchpadInputService : IDisposable
                 _inTouchSession = true;
                 _swipeTriggeredThisSession = false;
                 _edgeExitedThisSession = false;
-                _physicalClickSentThisSession = false;
                 _physicalButtonWasDown = physicalButtonPressed;
                 _startX = rawX;
                 _startY = rawY;
@@ -839,19 +836,9 @@ public sealed class TouchpadInputService : IDisposable
                 if (physicalButtonPressed && !_physicalButtonWasDown)
                 {
                     _physicalButtonWasDown = true;
-                    _physicalClickSentThisSession = true;
                     _suppressClickUntilTick = now + 200;
 
-                    if (isInside)
-                    {
-                        var key = NumpadKeyMap.HitTestNormalized(localX, localY);
-                        if (key is not null)
-                        {
-                            _feedbackService.KeyCommitted();
-                            NumpadTapDetected?.Invoke(rawX, rawY, localX, localY);
-                        }
-                    }
-                    else
+                    if (!isInside)
                     {
                         // Outside physical click: check double click to mouse mode
                         CheckOutsideDoubleTap(rawX, rawY, now);
@@ -885,18 +872,13 @@ public sealed class TouchpadInputService : IDisposable
         }
 
         // -------------------------------------------------------------
-        // Case C: All fingers lifted (activeCount == 0)
+        // Case C: All fingers lifted (activeCount == 0) -> Commit key on lift-off!
         // -------------------------------------------------------------
         if (_inTouchSession)
         {
-            long elapsedMs = now - _startTimeTick;
-
             if (IsNumpadActive
                 && !_swipeTriggeredThisSession
-                && !_edgeExitedThisSession
-                && !_physicalClickSentThisSession
-                && _maxDistance <= TapMaxMovement
-                && elapsedMs <= MaxTapDurationMs)
+                && !_edgeExitedThisSession)
             {
                 var (localX, localY, isInside) = TransformToLocal(_lastX, _lastY);
                 if (isInside)
@@ -915,7 +897,7 @@ public sealed class TouchpadInputService : IDisposable
                 }
                 else
                 {
-                    // User tapped outside the numpad area:
+                    // User lifted outside the numpad area:
                     // Single tap is IGNORED (palm rejection), double tap exits to mouse mode!
                     CheckOutsideDoubleTap(_lastX, _lastY, now);
                 }
@@ -928,7 +910,6 @@ public sealed class TouchpadInputService : IDisposable
             _inTouchSession = false;
             _swipeTriggeredThisSession = false;
             _edgeExitedThisSession = false;
-            _physicalClickSentThisSession = false;
             _physicalButtonWasDown = false;
             _currentEnteredKeyId = null;
         }

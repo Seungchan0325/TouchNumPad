@@ -484,6 +484,8 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private NumpadKeyDefinition? _pressedKeyCard;
+
     // Direct mouse / touch screen interaction on the Numpad window
     private void KeyCard_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
@@ -496,14 +498,12 @@ public sealed partial class MainWindow : Window
 
         if (sender is Border border && border.Tag is NumpadKeyDefinition key)
         {
+            _pressedKeyCard = key;
             var pt = e.GetCurrentPoint(TouchOverlayCanvas).Position;
             ShowTouchIndicatorAtCanvasPoint(pt.X, pt.Y);
             SetHighlightedKey(key.Id);
-            _feedbackService.KeyCommitted();
-            KeyboardInjector.SendKey(key);
-
+            _feedbackService.KeyEntered(key);
             _indicatorHideTimer.Stop();
-            _indicatorHideTimer.Start();
             e.Handled = true;
         }
     }
@@ -513,12 +513,27 @@ public sealed partial class MainWindow : Window
         if (!_isNumpadMode)
             return;
 
-        _indicatorHideTimer.Stop();
-        _indicatorHideTimer.Start();
+        if (sender is Border border && border.Tag is NumpadKeyDefinition key && _pressedKeyCard == key)
+        {
+            _pressedKeyCard = null;
+            _feedbackService.KeyCommitted();
+            KeyboardInjector.SendKey(key);
+
+            _indicatorHideTimer.Stop();
+            _indicatorHideTimer.Start();
+            e.Handled = true;
+        }
+        else
+        {
+            _pressedKeyCard = null;
+            _indicatorHideTimer.Stop();
+            _indicatorHideTimer.Start();
+        }
     }
 
     private void KeyCard_PointerExited(object sender, PointerRoutedEventArgs e)
     {
+        _pressedKeyCard = null;
         if (!_indicatorHideTimer.IsEnabled)
         {
             SetHighlightedKey(null);
